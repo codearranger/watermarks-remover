@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
+SCRIPTS = ROOT / "service" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from container_meta import (  # noqa: E402
@@ -114,6 +114,22 @@ def test_html_cms_generator_preserved_by_clean():
     cleaned, actions = clean_html(html)
     assert "WordPress" in cleaned
     assert "viewport" in cleaned
+
+
+def test_html_cms_generator_attribute_names_are_case_insensitive():
+    for html in (
+        '<META NAME="generator" CONTENT="WordPress 6.0">',
+        '<meta Name="generator" Content="WordPress 6.0">',
+    ):
+        has_c2pa, has_ai, findings, _ = inspect_html(html)
+        assert not has_c2pa
+        assert not has_ai
+        assert any("cms" in finding for finding in findings)
+        assert clean_html(html)[0] == html
+
+    ai_html = '<META NAME="generator" CONTENT="Claude">'
+    assert inspect_html(ai_html)[1]
+    assert clean_html(ai_html)[0] == ""
 
 
 def test_html_ai_generator_still_dropped():

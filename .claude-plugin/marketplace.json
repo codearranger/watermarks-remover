@@ -10,7 +10,7 @@
       "name": "watermarks-remover",
       "source": "./",
       "displayName": "Watermarks Remover",
-      "description": "Strip multi-vendor AI provenance marks from text and files: invisible Unicode, statistical text watermarks (rewrite), and C2PA/EXIF/XMP/container metadata.",
+      "description": "Strip multi-vendor AI provenance marks from text and files: invisible Unicode, statistical text watermarks (rewrite), and C2PA/EXIF/XMP/container metadata. Drives the watermarks-remover HTTP service, which you run separately.",
       "license": "MIT",
       "category": "content",
       "keywords": [

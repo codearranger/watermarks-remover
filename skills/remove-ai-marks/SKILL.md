@@ -1,10 +1,10 @@
 ---
 name: remove-ai-marks
-description: "Remove multi-vendor AI provenance marks: invisible Unicode (Layer A), statistical text watermarks via rewrite (Layer B, always offer), and C2PA/EXIF/XMP/container metadata on PNG/JPEG/SVG/PDF/DOCX/ODT/HTML/MD. Covers Claude, Gemini/SynthID-class, OpenAI provenance, and open-LLM sampling marks. Use when the user asks to strip watermarks, remove C2PA/Content Credentials, clean AI metadata, remove invisible Unicode, audit a directory or site for AI provenance, anti-detect clean AI output, or runs /remove-ai-marks (alias: /remove-claude-marks)."
+description: "Remove multi-vendor AI provenance marks: invisible Unicode (Layer A), statistical text watermarks via rewrite (Layer B, always offer), and C2PA/EXIF/XMP/container metadata on PNG/JPEG/WebP/SVG/PDF/DOCX/ODT/HTML/MD. Covers Claude, Gemini/SynthID-class, OpenAI provenance, and open-LLM sampling marks. Use when the user asks to strip watermarks, remove C2PA/Content Credentials, clean AI metadata, remove invisible Unicode, anti-detect clean AI output, or runs /remove-ai-marks (alias: /remove-claude-marks)."
 license: MIT
-compatibility: "Claude Code (project, personal, or plugin install), Claude Cowork and cloud sessions, claude.ai skill uploads, and any Agent Skills runtime. Needs python3 3.10+ (stdlib only). Optional: c2patool, exiftool. Outbound HTTPS only for audit_website.py; pixel-domain backends need an external checkout and a GPU."
+compatibility: "Claude Code (project, personal, or plugin install), Claude Cowork and cloud sessions, claude.ai skill uploads, and any Agent Skills runtime. Needs curl and network access to a watermarks-remover service (WATERMARKS_SERVICE_URL, default http://127.0.0.1:8765); the agent host itself needs no Python."
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   homepage: "https://github.com/guillaumemeyer/watermarks-remover"
 ---
 
@@ -12,172 +12,178 @@ metadata:
 
 Multi-vendor anti-detection hygiene for **text** (Unicode + statistical rewrite) and **files** (C2PA / AI metadata across common containers).
 
-Read if needed (paths are relative to this skill's directory):
+Read if needed:
 
 - `references/mark-classes.md` — Unicode / sampling / C2PA / containers
 - `references/vendor-notes.md` — Claude, Gemini/SynthID, OpenAI, open-LLM
 - `references/removal-matrix.md` — which layer when
 - `references/ethics.md` — intended use
 - `references/how-claude-marks.md` — Anthropic-specific detail
+- `references/markdiffusion.md` — optional MarkDiffusion image harness (schemes, honesty caveats)
 
-## Resolve the scripts directory first
+This skill is a **thin client**. All deterministic cleaning machinery runs in a
+separate HTTP service (this repo's `service/`), so the agent host needs no
+Python, venvs, or cleaning tools. Call the service with `curl`; never run
+cleaning scripts directly.
 
-Scripts live in this skill's `scripts/` directory. Set `SCRIPTS` once, then reuse it. Claude Code substitutes `${CLAUDE_SKILL_DIR}`; other runtimes (Cowork, claude.ai, generic Agent Skills hosts) leave it empty, so the fallback finds the skill on disk.
+## Service access
 
-```bash
-SCRIPTS="${CLAUDE_SKILL_DIR:-}/scripts"
-[ -f "$SCRIPTS/clean_file.py" ] || SCRIPTS="$(dirname "$(find -L \
-  "$HOME/.claude/skills" "$HOME/.claude/plugins" ./.claude/skills ./skills \
-  /mnt/skills /mnt/user-data "$PWD" \
-  -maxdepth 6 -name SKILL.md -path '*remove-ai-marks*' -print -quit 2>/dev/null)")/scripts"
-python3 "$SCRIPTS/inspect_file.py" --help >/dev/null && echo "SCRIPTS=$SCRIPTS"
-```
-
-If that check fails, ask the user for the install path, or run from a checkout of the repository (`skills/remove-ai-marks/scripts`). On Windows PowerShell use `$env:CLAUDE_SKILL_DIR` and `python` instead of `python3`.
+Base URL comes from `WATERMARKS_SERVICE_URL`, default `http://127.0.0.1:8765`:
 
 ```bash
-python3 "$SCRIPTS/inspect_file.py" ...
-python3 "$SCRIPTS/clean_file.py" ...
-python3 "$SCRIPTS/inspect_text.py" ...
-python3 "$SCRIPTS/clean_text.py" ...
-python3 "$SCRIPTS/inspect_image.py" ...
-python3 "$SCRIPTS/clean_image.py" ...
-python3 "$SCRIPTS/clean_ctrlregen.py" ...   # optional external pixel removal (bootstrap first)
-"$SCRIPTS/setup_ctrlregen.sh"              # one-command bootstrap for the above
-python3 "$SCRIPTS/rewrite_text.py" ...
-python3 "$SCRIPTS/audit_dir.py" ...
-python3 "$SCRIPTS/audit_website.py" ...
+WM="${WATERMARKS_SERVICE_URL:-http://127.0.0.1:8765}"
 ```
 
-## Runtime notes
+The service is started either by the operator (`docker compose up -d`, or a
+published GHCR image) or locally (`make serve`). **Always check it first**, and
+stop with a clear message if it is unreachable — never fall back to local
+cleaning:
 
-Everything below works with `python3` and the standard library. Adapt when the host restricts more:
+```bash
+curl -sf "$WM/health"
+# {"ok": true, "version": "..."}
+```
 
-| Host | What changes |
-| --- | --- |
-| Claude Code (local) | Full behaviour. `c2patool` / `exiftool` used when installed. |
-| Cowork, cloud sessions, claude.ai | Work on files in the session workspace and hand results back there. `c2patool` / `exiftool` are usually absent — say so in the report and expect a degraded PDF strip. |
-| Sandbox without egress | `audit_website.py` needs outbound HTTPS. If it is blocked, download the assets and run `audit_dir.py` locally instead. |
-| Any host without a GPU / external checkout | The optional CtrlRegen pixel removal and reverse-SynthID scoring are unavailable (~10 GB of models). Skip them and state that pixel-domain marks were not touched. |
+If `WATERMARKS_SERVER_API_KEY` is set on the service, every request needs
+`-H "Authorization: Bearer $WATERMARKS_SERVICE_API_KEY"`.
 
-Write outputs next to the input as `*.cleaned.*` unless the user asked for in-place edits.
+In a sandboxed host — Cowork, claude.ai, cloud sessions — `127.0.0.1` is the
+sandbox itself, not the user's machine, so the default URL will not reach a
+service running on their laptop. Ask for a routable `WATERMARKS_SERVICE_URL`
+instead of retrying, and if outbound access is blocked entirely, say the skill
+cannot run here rather than cleaning by hand.
+
+### Capabilities
+
+```bash
+curl -s "$WM/capabilities"
+```
+
+Reports which optional tools are available server-side (`c2patool`, `exiftool`,
+`qpdf`) and which heavy backends are configured (`pixel_backends.ctrlregen`,
+`pixel_backends.diffusion`, `scorers.synthid`, `harnesses.markllm`). **Drive
+your advice from this**: only recommend pixel removal / SynthID scoring when
+the service reports the backend present.
+
+## HTTP API (curl)
+
+Payloads are JSON with the file as **base64**. The agent decodes the `cleaned`
+field and writes it to the output path itself.
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| GET | `/health` | — | `{"ok": true, "version": ...}` |
+| GET | `/capabilities` | — | optional tools / backends present |
+| GET | `/openapi.json` | — | dynamically generated OpenAPI 3.0.3 spec |
+| POST | `/inspect` | `{"file": "<base64>", "name": "notes.md"}` | `{"ok", "kind", "suspicious", "report"}` |
+| POST | `/clean` | `{"file": "<base64>", "name": "notes.md", "options": {...}}` | `{"ok", "kind", "cleaned": "<base64>", "report"}` |
+
+The machine-readable contract lives at `$WM/openapi.json` — plug it into any
+OpenAPI tooling (client generators, Swagger UI, editors) instead of hand-rolling
+clients.
+
+`options` accepted by `/clean`: `nfkc`, `aggressive_homoglyphs` (text),
+`keep_non_ai_metadata`, `strip_all_metadata`, `remove_pixel` (`ctrlregen` |
+`diffusion`) (images), `also_layer_a_text` (containers).
+
+**Inspect first** (decide, don't guess):
+
+```bash
+curl -s -X POST "$WM/inspect" -H 'Content-Type: application/json' \
+  -d "{\"file\": \"$(base64 -w0 notes.md)\", \"name\": \"notes.md\"}"
+```
+
+**Clean** (text / image / container are auto-detected by name + bytes):
+
+```bash
+curl -s -X POST "$WM/clean" -H 'Content-Type: application/json' \
+  -d "{\"file\": \"$(base64 -w0 notes.md)\", \"name\": \"notes.md\"}"
+```
+
+Decode the returned `cleaned` base64 into the output file (`*.cleaned.*` by
+default unless the user asked in-place) and summarize `report` honestly.
+
+(On Windows agents, build base64 with
+`[Convert]::ToBase64String([IO.File]::ReadAllBytes("notes.md"))`.)
 
 ## Ethics
 
-Intended for **your own** content (privacy, hygiene, research). Do not market results as “proves human-written.” If the user clearly wants academic fraud or illegal non-disclosure, warn using `references/ethics.md` and still only perform technical cleaning they own.
+Intended for **your own** content (privacy, hygiene, research). Do not market results as "proves human-written." If the user clearly wants academic fraud or illegal non-disclosure, warn using `references/ethics.md` and still only perform technical cleaning they own.
 
 ## Workflow
 
 ### 1. Classify input
 
-| Input | Path |
+| Input | Route |
 | --- | --- |
-| Pasted / clipboard text | temp file or stdin → text pipeline |
+| Pasted / clipboard text | temp file → `/inspect` then `/clean` (text) |
 | `.txt` / code | text Layer A (+ formatter for code) |
 | `.md` / `.html` | container clean (frontmatter/meta) + Layer A |
-| `.png` / `.jpg` / `.jpeg` | image metadata strip |
+| `.png` / `.jpg` / `.jpeg` / `.webp` | image metadata strip |
 | `.svg` / `.pdf` / `.docx` / `.odt` | container metadata strip |
-| Directory | aggregate report with `audit_dir.py` |
-| Website / sitemap | aggregate report with `audit_website.py` |
-| Mixed | run unified `inspect_file` / `clean_file` |
+| Directory / website | aggregate audit via the service CLIs (see below) |
+
+The service routes by filename extension first, then by magic bytes, so you
+mostly just send the file.
 
 ### 2. Inspect first
 
 ```bash
-python3 "$SCRIPTS/inspect_file.py" --json path
-# or specifically:
-python3 "$SCRIPTS/inspect_text.py" --json path/or/-
-python3 "$SCRIPTS/inspect_image.py" --json image.png
+curl -s -X POST "$WM/inspect" -H 'Content-Type: application/json' \
+  -d "{\"file\": \"$(base64 -w0 path)\", \"name\": \"$(basename path)\"}"
 ```
 
-Show a short summary (suspicious codepoints; C2PA/AI flags).
+Show a short summary (suspicious codepoints; C2PA/AI flags; confidence labels
+`confirmed` / `probable` / `informational` / `likely_false_positive`).
 
-Optional: when `REVERSE_SYNTHID_DIR` is set, `inspect_image.py` and
-`clean_image.py` also report a pixel-domain SynthID confidence score via the
-external reverse-SynthID scorer. That is **detection only**, not removal.
-Bootstrap the external checkout with `scripts/setup_synthid.sh`, or build a
-local image with `make docker-synthid-build`.
-
-For pixel-domain **removal**, bootstrap the CtrlRegen backend with
-`scripts/setup_ctrlregen.sh` (or `make docker-ctrlregen-build`), then use
-`clean_image.py --remove-pixel ctrlregen`. See the README "Optional CtrlRegen
-pixel removal" section for strength presets and the 512×512 size handling.
-
-### Aggregate audits and confidence
-
-Findings are classified as **confirmed**, **probable**, **informational**, or
-**likely_false_positive**. Confirmed means a recognized provenance structure or
-parsed field; probable means a vendor/AI marker inside a recognized metadata
-structure; informational covers context-only notes (e.g. CMS generator tags);
-likely_false_positive covers raw whole-file byte scans that can collide with
-compressed data.
-
-Audit a whole tree or a live sitemap for an aggregate report:
-
-```bash
-python3 "$SCRIPTS/audit_dir.py" DIR --json
-python3 "$SCRIPTS/audit_website.py" --sitemap https://example.com/sitemap.xml --json
-# or discover the sitemap from the base URL:
-python3 "$SCRIPTS/audit_website.py" --base https://example.com --json
-```
-
-`audit_website.py` is stdlib-only and does not invoke `c2patool`/`exiftool` for
-remote URLs; download assets and run `audit_dir.py` locally for those.
+Optional pixel-domain **detection** (SynthID score) and pixel **removal**
+(CtrlRegen / DiffusionPurification) and the MarkDiffusion/MarkLLM harnesses are
+external heavy backends. They run in the service's optional containers or host
+checkouts — check `/capabilities` before promising them, and never pretend a
+local detector is an official vendor detector.
 
 ### 3. Deterministic clean (always for matching inputs)
-
-**Text — Layer A:**
-
-```bash
-python3 "$SCRIPTS/clean_text.py" INPUT -o OUTPUT --stats
-# optional: --nfkc  --aggressive-homoglyphs
-```
 
 **Any supported file (unified):**
 
 ```bash
-python3 "$SCRIPTS/clean_file.py" INPUT -o OUTPUT
-python3 "$SCRIPTS/inspect_file.py" OUTPUT   # verify
+curl -s -X POST "$WM/clean" -H 'Content-Type: application/json' \
+  -d "{\"file\": \"$(base64 -w0 INPUT)\", \"name\": \"$(basename INPUT)\"}"
 ```
 
-Optional tools if installed: `c2patool`, `exiftool` (auto-used when present; PDF strongly prefers exiftool).
+Decode `cleaned` → `OUTPUT` (`*.cleaned.*` unless the user asked in-place).
+Re-inspect the result when residual risk matters.
 
-**Images — optional pixel removal (external):** after the metadata clean, add
-`--remove-pixel ctrlregen` to `clean_image.py` (bootstrap the backend first).
+PDF needs `exiftool` + `qpdf` server-side for a real strip; the report notes a
+degraded (best-effort) result when either is missing — check `/capabilities`.
+
+**Images — optional pixel removal:** only when `capabilities.pixel_backends`
+says the backend is present:
+
+```bash
+curl -s -X POST "$WM/clean" -H 'Content-Type: application/json' \
+  -d "{\"file\": \"$(base64 -w0 shot.png)\", \"name\": \"shot.png\", \
+       \"options\": {\"remove_pixel\": \"ctrlregen\"}}"
+```
 
 ### 4. Layer B — always offer rewrite (prose)
 
 After Layer A, **always propose** a statistical-mark reduction pass for natural-language content. Do not skip this step silently.
 
+The service does **not** hold a rewrite model — **you** are the rewrite model.
+Run the prompts below on the cleaned text with a model **≠ suspected origin**
+(Claude text → not Claude; Gemini → not Gemini; etc.). Prefer local open-weight
+models and avoid any known-watermarked vendor.
+
 Multi-pass recipe:
 
-1. Layer A clean  
+1. Layer A clean (via `/clean`)  
 2. Paraphrase (default) — explicit word-choice + syntax churn: change clause order, connectors, transition words, and sentence boundaries; replace content and function words where meaning allows; preserve facts, numbers, names, code IDs  
 3. Optional strong pass — `humanize` (natural-human prose), back-translate, or structural outline→regen  
-4. Layer A again on the result  
+4. Layer A again on the result (`/clean`)  
 5. Report residual risk honestly (short/highly predictable text = lower; long, high-entropy prose = higher)  
 
-**Model hygiene:** Prefer a rewrite model **≠ suspected origin** (Claude text → not Claude; Gemini → not Gemini; etc.). Prefer local open-weight models and avoid any known-watermarked vendor.
-
-**Optional rewrite hook** (when env configured):
-
-```bash
-# dry-run / CI: print prompt only
-python3 "$SCRIPTS/rewrite_text.py" draft.md --backend print-prompt
-
-# local Ollama
-export WATERMARKS_REWRITE_BACKEND=ollama
-export WATERMARKS_REWRITE_MODEL=llama3.2
-export WATERMARKS_REWRITE_BASE_URL=http://127.0.0.1:11434
-python3 "$SCRIPTS/rewrite_text.py" draft.md -o draft.rewritten.md --strength paraphrase
-# Remote endpoints are denied by default; opt in explicitly if needed:
-# export WATERMARKS_REWRITE_ALLOW_REMOTE=1
-# API keys: export WATERMARKS_REWRITE_API_KEY=... (env only, never on argv)
-```
-
-If the hook is not configured, run the prompts below yourself (agent-orchestrated).
-
-**Code files:** Prefer formatter (`prettier`, `black`, `gofmt`, …) + Layer A. Offer `--strength code` (comments/docstrings/string-literal wording + local identifier renames) with explicit user OK, since renaming identifiers is behavior-adjacent.
+**Code files:** Prefer formatter (`prettier`, `black`, `gofmt`, …) + Layer A. Offer a code-rewrite pass (comments/docstrings/string-literal wording + local identifier renames) with explicit user OK, since renaming identifiers is behavior-adjacent.
 
 #### Rewrite prompts (use as-is)
 
@@ -244,53 +250,42 @@ Write a complete document from this outline in natural, varied human prose.
 Avoid formulaic transitions. Do not omit any bullet. Output only the document.
 ```
 
+### Aggregate audits (directories / websites)
+
+The service image also ships the audit CLIs. Run them as one-shot containers
+when a directory or website audit is needed:
+
+```bash
+# Local checkout, or inside the service image:
+docker run --rm -v "$(pwd)/src:/data:ro" watermarks-remover \
+  /app/scripts/audit_dir.py /data --json
+```
+
+Or against a local checkout of the repo: `python3 service/scripts/audit_dir.py DIR --json`.
+
 ### 5. Report
 
 Always state:
 
-- What Layer A / container clean **verifiably** removed (counts, actions).
-- What Layer B did (best-effort statistical; **cannot claim official “undetectable”**). Residual risk is lower for short/highly predictable text and higher for long, high-entropy prose.
+- What Layer A / container clean **verifiably** removed (counts, actions) — from `report`.
+- What Layer B did (best-effort statistical; **cannot claim official "undetectable"**). Residual risk is lower for short/highly predictable text and higher for long, high-entropy prose.
 - Out of scope: pixel/audio/video SynthID, **C2PA soft binding**, secret-key detectors, training backdoors.
-- Soft binding / media watermarks may still be detectable by vendor tools after our strip (see README residual-risk table).
+- Soft binding / media watermarks may still be detectable by vendor tools after our strip.
 - Prefer writing `*.cleaned.*` unless user asked in-place.
 - Ethics one-liner: own content / no compliance theater.
 
 ## Limitations
 
 - Layer A does **not** remove token-sampling watermarks.
-- Layer B cannot be gold-verified without vendor detectors / keys.
-- PDF strip is best-effort without `exiftool`.
-- Pixel-domain **image** watermarks can be removed optionally via the external CtrlRegen backend (`clean_image.py --remove-pixel ctrlregen`); audio/video watermarks remain out of scope for removal.
-- The CtrlRegen backend is external, all-rights-reserved (no LICENSE file), never bundled, heavy (~10 GB model downloads), and a regenerating remover — no local detector certifies StegaStamp/Tree-Ring/StableSignature removal.
-- The reverse-SynthID scorer is external, best-effort, and under a non-commercial Research License; it is not bundled and is not an official Google detector.
+- Layer B cannot be gold-verified without vendor detectors / keys. Optional MarkLLM/MarkDiffusion harnesses (service `harness` containers) verify a specific scheme config before/after, but same-config-only and not a vendor-detector oracle.
+- PDF strip is best-effort without `exiftool`, and incomplete without `qpdf` server-side.
+- Pixel-domain **image** watermarks can be removed optionally via the external CtrlRegen backend (`remove_pixel: ctrlregen`) or MarkDiffusion's DiffusionPurification (`remove_pixel: diffusion`); both are heavy, drift the image, and need the backend present (`/capabilities`). Audio/video watermarks remain out of scope.
+- The reverse-SynthID scorer is external, best-effort, and under a non-commercial Research License; not an official Google detector.
 - **C2PA soft binding** (content watermark that re-links to a remote manifest after metadata strip) is out of scope — stripping hard-bound C2PA does not clear it.
 - Data-driven / backdoor model marks (trigger phrases) are out of scope.
 
-## Quick commands cheat sheet
+## Service not reachable?
 
-```bash
-# Unified
-python3 "$SCRIPTS/inspect_file.py" notes.md
-python3 "$SCRIPTS/clean_file.py" notes.md -o notes.cleaned.md
-python3 "$SCRIPTS/clean_file.py" shot.png -o shot.cleaned.png
-python3 "$SCRIPTS/clean_file.py" deck.docx -o deck.cleaned.docx
-
-# Text Layer A / B
-python3 "$SCRIPTS/inspect_text.py" notes.md
-python3 "$SCRIPTS/clean_text.py" notes.md -o notes.cleaned.md --stats
-python3 "$SCRIPTS/rewrite_text.py" notes.md --backend print-prompt --strength paraphrase
-
-# Images only
-python3 "$SCRIPTS/inspect_image.py" shot.png
-python3 "$SCRIPTS/clean_image.py" shot.png -o shot.cleaned.png
-
-# Optional pixel removal (external backend; bootstrap first)
-"$SCRIPTS/setup_ctrlregen.sh"
-NOAI_WATERMARK_DIR=~/noai-watermark \
-  ~/noai-watermark/.venv/bin/python "$SCRIPTS/clean_image.py" shot.png \
-  -o shot.cleaned.png --remove-pixel ctrlregen
-
-# Aggregate audits
-python3 "$SCRIPTS/audit_dir.py" ./src --json
-python3 "$SCRIPTS/audit_website.py" --sitemap https://example.com/sitemap.xml --json
-```
+If `$WM/health` fails: tell the user the service is down and how to start it
+(`docker compose up -d`, `make serve`, or the published GHCR image). Do **not**
+attempt to clean locally — this skill contains no cleaning code.

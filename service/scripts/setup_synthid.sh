@@ -117,5 +117,5 @@ cat <<EOF
 Done. Score an image with:
 
   export REVERSE_SYNTHID_DIR="$DIR"
-  "$DIR/.venv/bin/python" "\$REPO/skills/remove-ai-marks/scripts/score_synthid.py" IMAGE
+  "$DIR/.venv/bin/python" "\$REPO/service/scripts/score_synthid.py" IMAGE
 EOF

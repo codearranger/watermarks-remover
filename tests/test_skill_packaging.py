@@ -31,19 +31,24 @@ def test_frontmatter_uses_only_spec_fields():
     assert set(meta) <= bundle_skill.SPEC_FIELDS
 
 
-def test_skill_body_resolves_its_scripts_directory():
-    body = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    assert "${CLAUDE_SKILL_DIR:-}/scripts" in body
-    assert "<skill_dir>" not in body
+def test_skill_ships_no_code():
+    # The skill is a thin HTTP client: markdown only, so it stays installable on
+    # hosts with no Python and small enough to upload.
+    payload = [path.suffix for path in bundle_skill.bundle_files(SKILL_DIR)]
+    assert set(payload) == {".md"}
 
 
-def test_referenced_scripts_and_references_exist():
+def test_referenced_references_exist():
     body = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    for name in ("inspect_file.py", "clean_file.py", "audit_dir.py", "audit_website.py"):
-        assert (SKILL_DIR / "scripts" / name).is_file(), name
-        assert name in body
     for name in ("mark-classes.md", "vendor-notes.md", "removal-matrix.md", "ethics.md"):
         assert (SKILL_DIR / "references" / name).is_file(), name
+        assert name in body
+
+
+def test_skill_documents_the_sandbox_service_url():
+    body = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    assert "WATERMARKS_SERVICE_URL" in body
+    assert "<skill_dir>" not in body
 
 
 def test_bundle_has_single_top_level_directory(tmp_path):

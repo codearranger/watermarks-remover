@@ -1,4 +1,4 @@
-"""Detect and strip C2PA / AI-related metadata from PNG and JPEG (stdlib)."""
+"""Detect and strip C2PA / AI-related metadata from PNG, JPEG, and WebP (stdlib)."""
 
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ ctrlregen_subprocess_preexec_fn = ctrlregen_preexec_fn if os.name == "posix" els
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 JPEG_SOI = b"\xff\xd8"
+WEBP_RIFF = b"RIFF"
+WEBP_SIG = b"WEBP"
 
 # Chunk types / content patterns associated with C2PA / AI provenance
 C2PA_MARKERS = (
@@ -77,7 +79,7 @@ AI_META_HINTS = (
 @dataclass
 class ImageInspectReport:
     path: str
-    format: str  # png | jpeg | unknown
+    format: str  # png | jpeg | webp | unknown
     has_c2pa: bool
     has_ai_metadata: bool
     findings: list[str] = field(default_factory=list)
@@ -106,6 +108,8 @@ def detect_format(data: bytes) -> str:
         return "png"
     if data.startswith(JPEG_SOI):
         return "jpeg"
+    if len(data) >= 12 and data[:4] == WEBP_RIFF and data[8:12] == WEBP_SIG:
+        return "webp"
     return "unknown"
 
 
@@ -213,6 +217,65 @@ def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
     if whole and not has_c2pa:
         has_c2pa = True
         findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
+    return has_c2pa, has_ai or has_c2pa, findings
+
+
+def _webp_chunks(data: bytes) -> tuple[list[tuple[bytes, bytes, bytes]], list[str]]:
+    if detect_format(data) != "webp":
+        return [], ["not a WebP"]
+
+    notes: list[str] = []
+    declared_size = struct.unpack("<I", data[4:8])[0]
+    if declared_size + 8 != len(data):
+        notes.append(
+            f"RIFF size mismatch: header={declared_size + 8} actual={len(data)}"
+        )
+
+    chunks: list[tuple[bytes, bytes, bytes]] = []
+    pos = 12
+    while pos + 8 <= len(data):
+        fourcc = data[pos : pos + 4]
+        length = struct.unpack("<I", data[pos + 4 : pos + 8])[0]
+        payload_start = pos + 8
+        payload_end = payload_start + length
+        padded_end = payload_end + (length & 1)
+        if padded_end > len(data):
+            name = fourcc.decode("latin-1", errors="replace")
+            notes.append(f"truncated WebP chunk {name}")
+            break
+        chunks.append(
+            (fourcc, data[payload_start:payload_end], data[payload_end:padded_end])
+        )
+        pos = padded_end
+    if pos != len(data) and not any("truncated" in note for note in notes):
+        notes.append(f"trailing WebP bytes: {len(data) - pos}")
+    return chunks, notes
+
+
+def inspect_webp(data: bytes) -> tuple[bool, bool, list[str]]:
+    chunks, findings = _webp_chunks(data)
+    if not chunks and findings == ["not a WebP"]:
+        return False, False, findings
+
+    has_c2pa = False
+    has_ai = False
+    for fourcc, payload, _padding in chunks:
+        name = fourcc.decode("latin-1", errors="replace")
+        if fourcc.upper() == b"C2PA":
+            has_c2pa = True
+            has_ai = True
+            findings.append("WebP C2PA chunk")
+            continue
+        if fourcc in (b"XMP ", b"EXIF"):
+            hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+            if hits:
+                has_ai = True
+                if any(
+                    hit.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth")
+                    for hit in hits
+                ):
+                    has_c2pa = True
+                findings.append(f"WebP {name}: {', '.join(hits[:8])}")
     return has_c2pa, has_ai or has_c2pa, findings
 
 
@@ -335,6 +398,100 @@ def _ctrlregen_python(upstream: Path) -> str:
     return sys.executable
 
 
+def _markdiffusion_python(upstream: Path | None) -> str:
+    """Prefer the bootstrap venv so torch/diffusers/markdiffusion importable."""
+    if upstream is not None:
+        if os.name == "nt":
+            venv = upstream / ".venv" / "Scripts" / "python.exe"
+        else:
+            venv = upstream / ".venv" / "bin" / "python"
+        if venv.is_file():
+            return str(venv)
+    return sys.executable
+
+
+def run_markdiffusion_purify(
+    path: Path,
+    output: Path,
+    *,
+    upstream_dir: str | None = None,
+    strength: float = 0.3,
+    model: str | None = None,
+    size: int = 512,
+    steps: int = 50,
+    device: str | None = None,
+    timeout: int = 3600,
+) -> dict[str, Any]:
+    """Run the optional MarkDiffusion DiffusionPurification remover in a subprocess.
+
+    Returns ``{"available": False, "error": ...}`` when the backend is not
+    configured, its dependencies are missing, or it fails at runtime; a
+    successful run is ``{"available": True, ...}``.
+    """
+    if upstream_dir is None:
+        upstream_dir = os.environ.get("MARKDIFFUSION_DIR")
+
+    upstream = (
+        Path(upstream_dir).expanduser().resolve() if upstream_dir else None
+    )
+    if upstream is not None and not upstream.is_dir():
+        return {
+            "available": False,
+            "error": f"MarkDiffusion dir not found: {upstream}",
+        }
+
+    script = SCRIPTS_DIR / "markdiffusion_harness.py"
+    cmd = [
+        _markdiffusion_python(upstream),
+        str(script),
+        "purify",
+        str(path),
+        "-o",
+        str(output),
+        "--purification-strength",
+        str(strength),
+        "--size",
+        str(size),
+        "--steps",
+        str(steps),
+        "--json",
+    ]
+    if upstream is not None:
+        cmd += ["--upstream-dir", str(upstream)]
+    if model:
+        cmd += ["--model", str(model)]
+    if device:
+        cmd += ["--device", str(device)]
+
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            preexec_fn=ctrlregen_subprocess_preexec_fn,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "available": False,
+            "error": f"DiffusionPurification timed out after {timeout}s",
+        }
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+    if r.returncode != 0:
+        return {"available": False, "error": (r.stderr or "").strip()[:2000]}
+    try:
+        payload = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError as e:
+        return {
+            "available": False,
+            "error": f"bad MarkDiffusion adapter JSON: {e}",
+        }
+    payload["available"] = True
+    return payload
+
+
 def run_ctrlregen_clean(
     path: Path,
     output: Path,
@@ -417,8 +574,10 @@ def inspect_image(
         has_c2pa, has_ai, findings = inspect_png(data)
     elif fmt == "jpeg":
         has_c2pa, has_ai, findings = inspect_jpeg(data)
+    elif fmt == "webp":
+        has_c2pa, has_ai, findings = inspect_webp(data)
     else:
-        has_c2pa, has_ai, findings = False, False, ["unsupported format (MVP: PNG/JPEG)"]
+        has_c2pa, has_ai, findings = False, False, ["unsupported format (PNG/JPEG/WebP)"]
 
     notes: list[str] = []
     if fmt == "unknown":
@@ -583,6 +742,45 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
     return bytes(out), actions
 
 
+def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[str]]:
+    chunks, notes = _webp_chunks(data)
+    if not chunks and notes == ["not a WebP"]:
+        raise ValueError("not WebP")
+    if notes:
+        raise ValueError("malformed WebP: " + "; ".join(notes))
+
+    actions: list[str] = []
+    kept: list[tuple[bytes, bytes, bytes]] = []
+    removed_flags = 0
+    metadata_flags = {b"ICCP": 0x20, b"EXIF": 0x08, b"XMP ": 0x04}
+
+    for fourcc, payload, padding in chunks:
+        drop = fourcc.upper() == b"C2PA"
+        if fourcc in metadata_flags:
+            drop = strip_all_metadata or bool(
+                _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+            )
+        if drop:
+            name = fourcc.decode("latin-1", errors="replace")
+            actions.append(f"drop WebP chunk {name}")
+            removed_flags |= metadata_flags.get(fourcc, 0)
+        else:
+            kept.append((fourcc, payload, padding))
+
+    body = bytearray(WEBP_SIG)
+    for fourcc, payload, padding in kept:
+        if fourcc == b"VP8X" and len(payload) >= 1 and removed_flags:
+            payload = bytes([payload[0] & ~removed_flags]) + payload[1:]
+        body.extend(fourcc)
+        body.extend(struct.pack("<I", len(payload)))
+        body.extend(payload)
+        body.extend(padding if len(payload) & 1 else b"")
+
+    if not actions:
+        actions.append("no WebP metadata chunks removed (already clean or none matched)")
+    return WEBP_RIFF + struct.pack("<I", len(body)) + bytes(body), actions
+
+
 def clean_image(
     path: Path,
     dest: Path,
@@ -596,6 +794,13 @@ def clean_image(
     ctrlregen_device: str | None = None,
     ctrlregen_seed: int | None = None,
     ctrlregen_timeout: int = 3600,
+    markdiffusion_dir: str | None = None,
+    markdiffusion_strength: float = 0.3,
+    markdiffusion_model: str | None = None,
+    markdiffusion_size: int = 512,
+    markdiffusion_steps: int = 50,
+    markdiffusion_device: str | None = None,
+    markdiffusion_timeout: int = 3600,
 ) -> dict[str, Any]:
     synthid_before = run_synthid_score(path, synthid_dir)
     data = path.read_bytes()
@@ -604,6 +809,8 @@ def clean_image(
         cleaned, actions = strip_png(data, strip_all_text=strip_all_metadata)
     elif fmt == "jpeg":
         cleaned, actions = strip_jpeg(data, strip_all_app=strip_all_metadata)
+    elif fmt == "webp":
+        cleaned, actions = strip_webp(data, strip_all_metadata=strip_all_metadata)
     else:
         raise ValueError(f"unsupported format: {fmt}")
 
@@ -631,25 +838,48 @@ def clean_image(
 
     pixel_removal: dict[str, Any] | None = None
     if remove_pixel:
-        if remove_pixel != "ctrlregen":
-            raise ValueError(f"unknown pixel remover: {remove_pixel}")
-        pixel_removal = run_ctrlregen_clean(
-            dest,
-            dest,
-            upstream_dir=ctrlregen_dir,
-            strength=ctrlregen_strength,
-            steps=ctrlregen_steps,
-            device=ctrlregen_device,
-            seed=ctrlregen_seed,
-            timeout=ctrlregen_timeout,
-        )
-        if pixel_removal.get("available"):
-            actions.append(f"CtrlRegen pixel removal (strength {ctrlregen_strength})")
-        else:
-            actions.append(
-                "CtrlRegen pixel removal skipped: "
-                f"{pixel_removal.get('error', 'unknown error')}"
+        if remove_pixel == "ctrlregen":
+            pixel_removal = run_ctrlregen_clean(
+                dest,
+                dest,
+                upstream_dir=ctrlregen_dir,
+                strength=ctrlregen_strength,
+                steps=ctrlregen_steps,
+                device=ctrlregen_device,
+                seed=ctrlregen_seed,
+                timeout=ctrlregen_timeout,
             )
+            if pixel_removal.get("available"):
+                actions.append(f"CtrlRegen pixel removal (strength {ctrlregen_strength})")
+            else:
+                actions.append(
+                    "CtrlRegen pixel removal skipped: "
+                    f"{pixel_removal.get('error', 'unknown error')}"
+                )
+        elif remove_pixel == "diffusion":
+            pixel_removal = run_markdiffusion_purify(
+                dest,
+                dest,
+                upstream_dir=markdiffusion_dir,
+                strength=markdiffusion_strength,
+                model=markdiffusion_model,
+                size=markdiffusion_size,
+                steps=markdiffusion_steps,
+                device=markdiffusion_device,
+                timeout=markdiffusion_timeout,
+            )
+            if pixel_removal.get("available"):
+                actions.append(
+                    f"DiffusionPurification pixel removal "
+                    f"(strength {markdiffusion_strength})"
+                )
+            else:
+                actions.append(
+                    "DiffusionPurification pixel removal skipped: "
+                    f"{pixel_removal.get('error', 'unknown error')}"
+                )
+        else:
+            raise ValueError(f"unknown pixel remover: {remove_pixel}")
 
     after = inspect_image(dest, synthid_dir=synthid_dir)
     return {

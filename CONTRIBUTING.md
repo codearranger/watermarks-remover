@@ -32,13 +32,16 @@ issue.
 
 | Path | Role |
 | --- | --- |
-| `skills/remove-ai-marks/SKILL.md` | Agent skill entry (workflow, ethics) |
-| `skills/remove-ai-marks/scripts/` | Layer A/B hooks + image/container cleaners |
+| `skills/remove-ai-marks/SKILL.md` | Agent skill entry (workflow, ethics) — remote client over HTTP |
 | `skills/remove-ai-marks/references/` | Vendors, mark classes, matrix, ethics |
+| `service/scripts/` | Layer A/B hooks + image/container cleaners + `server.py` HTTP service |
+| `service/Dockerfile*` | Container images (core + optional backends) |
+| `compose.yaml` | Local full-stack bring-up |
 | `.claude-plugin/` | Claude Code plugin + marketplace manifests |
 | `tools/bundle_skill.py` | Frontmatter validation and the claude.ai / Cowork upload bundle |
 | `tests/` | Pytest suite and fixtures |
 | `.github/workflows/ci.yml` | CI job `test` |
+| `.github/workflows/release-images.yml` | GHCR image publishing on `v*` tags |
 
 `SKILL.md` frontmatter must stay within the Agent Skills spec fields (`name`,
 `description`, `license`, `compatibility`, `metadata`, `allowed-tools`) — Claude Code
@@ -48,7 +51,7 @@ or claude.ai. Run `make validate-skill` after editing it.
 ## Layers (what to change where)
 
 1. **Layer A (Unicode / format controls)** — deterministic scripts under
-   `scripts/` (`text_unicode.py`, `clean_text.py`, `inspect_text.py`). Prefer
+   `service/scripts/` (`text_unicode.py`, `clean_text.py`, `inspect_text.py`). Prefer
    tests with fixtures in `tests/fixtures/`.
 2. **Layer B (statistical rewrite)** — guidance in `SKILL.md` plus optional
    `rewrite_text.py` (print-prompt default; ollama / openai-compatible). No
