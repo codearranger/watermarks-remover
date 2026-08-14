@@ -34,36 +34,102 @@ The skill follows the [Agent Skills](https://agentskills.io) spec (`name`, `desc
 `license`, `compatibility`, `metadata` frontmatter only), so it loads unchanged in
 Claude Code, Claude Cowork, claude.ai and any other Agent Skills runtime.
 
-### Claude Code
+Pick the row that matches how you use Claude:
 
-```bash
-# Project-local (.claude/skills — commit it to share with the repo, and cloud sessions pick it up)
-make install-skill-project              # or: PROJECT=/path/to/repo make install-skill-project
+| You use | Install with | Invoke with |
+| --- | --- | --- |
+| Claude Code, any project | [Plugin](#claude-code--plugin-no-clone) — no clone, updates in place | `/remove-ai-marks` |
+| Claude Code, one repo | [Project skill](#claude-code--project-skill) — commit it for your team | `/remove-ai-marks` |
+| Claude Code, your machine | [Personal skill](#claude-code--personal-skill) | `/remove-ai-marks` |
+| Cowork, claude.ai, cloud sessions | [Upload bundle](#claude-cowork-claudeai-and-cloud-sessions) | `/remove-ai-marks` or ask in plain words |
 
-# Personal, all projects (~/.claude/skills)
-make install-skill
-```
+### Claude Code — plugin (no clone)
 
-Or install the whole repository as a plugin, which bundles the skill and updates with
-`/plugin marketplace update`:
+The repository is also a Claude Code plugin, so this is the shortest path and the only one
+that self-updates. Run both commands inside Claude Code:
 
 ```
 /plugin marketplace add guillaumemeyer/watermarks-remover
 /plugin install watermarks-remover@watermarks-remover
 ```
 
-### Claude Cowork, cloud sessions and claude.ai
+Pick an install scope when prompted (user / project / local). If the install summary says
+`Run /reload-plugins to activate.`, run that; otherwise the skill is live immediately.
+Invoke it with `/remove-ai-marks`, or the namespaced `/watermarks-remover:remove-ai-marks`.
 
-Cowork and cloud sessions load the skills enabled on your claude.ai account — they do
-**not** read `~/.claude/skills` from your machine. Build the upload bundle and add it from
-**Customize → Skills** in the Cowork desktop app, or from the skills settings on claude.ai:
+```
+/plugin marketplace update watermarks-remover      # pull a newer version
+/plugin uninstall watermarks-remover@watermarks-remover
+```
+
+The same commands work from your shell as `claude plugin marketplace add …` /
+`claude plugin install …`. GitHub `owner/repo` sources clone over SSH by default; set
+`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` to clone over HTTPS instead.
+
+To try it from a clone without installing anything, start Claude Code with
+`claude --plugin-dir /path/to/watermarks-remover`.
+
+### Claude Code — project skill
+
+Puts the skill in one repository's `.claude/skills/`, so everyone who clones it gets the
+skill, and [cloud sessions](https://code.claude.com/docs/en/cloud-environments) pick it up
+too. Clone this repository first:
+
+```bash
+git clone https://github.com/guillaumemeyer/watermarks-remover.git
+cd watermarks-remover
+
+# Link into the repository you want the skill in
+PROJECT=/path/to/your/repo make install-skill-project
+```
+
+Without `make` (or on Windows), link or copy the skill directory yourself:
+
+```bash
+mkdir -p /path/to/your/repo/.claude/skills
+ln -sfn "$(pwd)/skills/remove-ai-marks" /path/to/your/repo/.claude/skills/remove-ai-marks
+# or, to commit the skill into that repo instead of linking it:
+cp -R skills/remove-ai-marks /path/to/your/repo/.claude/skills/
+```
+
+### Claude Code — personal skill
+
+Available in all your local projects, not shared with anyone:
+
+```bash
+make install-skill                      # links ~/.claude/skills/remove-ai-marks
+```
+
+Manual equivalent:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -sfn "$(pwd)/skills/remove-ai-marks" ~/.claude/skills/remove-ai-marks
+```
+
+Claude Code picks up new skills without a restart, but if you created
+`~/.claude/skills` or `.claude/skills` for the first time, restart it so the new directory
+is watched. Remove either install with `make uninstall-skill`.
+
+### Claude Cowork, claude.ai and cloud sessions
+
+Cowork and cloud sessions load the skills enabled on your **claude.ai account** — they do
+not read `~/.claude/skills` from your machine. Build the upload bundle from a clone:
 
 ```bash
 make bundle-skill      # writes dist/remove-ai-marks.zip (validated, single top-level dir)
 ```
 
-Cloud sessions can instead use the project install above, since they clone the repository
-and read its `.claude/skills/`.
+Then upload `dist/remove-ai-marks.zip`:
+
+- **Cowork (desktop app):** sidebar → **Customize** → **Skills** → add the zip.
+- **claude.ai:** skills settings → upload the zip.
+
+Enable it there, and it is available in Cowork chats, scheduled routines and cloud
+sessions. Rebuild and re-upload after pulling a new version.
+
+Cloud sessions have a second option: use the [project install](#claude-code--project-skill)
+and commit `.claude/skills/remove-ai-marks`, since they clone the repository.
 
 ### Grok Build
 
@@ -71,12 +137,25 @@ and read its `.claude/skills/`.
 make install-skill-grok                 # ~/.grok/skills/remove-ai-marks
 ```
 
-Invoke with `/remove-ai-marks` (`/watermarks-remover:remove-ai-marks` when installed as a
-plugin), or ask to “strip AI watermarks / C2PA / Claude marks / SynthID-class text.”
+### Verify and troubleshoot
 
-`make validate-skill` checks the frontmatter against the upload rules (spec fields only,
-name matches the directory, description under 1024 characters, bundle under 30 MB); the
-same checks run in CI.
+```bash
+make validate-skill    # frontmatter vs. the upload rules (spec fields only, name matches
+                       # the directory, description < 1024 chars, bundle < 30 MB)
+```
+
+If `/remove-ai-marks` does not appear in Claude Code:
+
+- the skill directory must be named `remove-ai-marks` and contain `SKILL.md` directly;
+- project skills load from `.claude/skills/` at or above your working directory — check you
+  linked it into the repository you actually opened;
+- a plugin install always answers to `/watermarks-remover:remove-ai-marks`, and to the bare
+  `/remove-ai-marks` unless another skill already claims that name. Check `/plugin` →
+  **Errors** for load failures, and `claude plugin validate .` from a clone to check the
+  manifests. If plugin skills stay missing, `rm -rf ~/.claude/plugins/cache` and reinstall.
+
+Once it loads, invoke it with `/remove-ai-marks` (alias `/remove-claude-marks`), or just ask
+to “strip AI watermarks / C2PA / Claude marks / SynthID-class text.”
 
 ### What each host can do
 
