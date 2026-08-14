@@ -24,7 +24,7 @@ What should have happened instead.
 
 - OS and arch:
 - Python version (`python3 --version`):
-- How you run the skill (Grok skill path / symlink / scripts only):
+- How you run the skill (Claude Code project / personal / plugin, Cowork or claude.ai upload, Grok skill path, scripts only):
 - Optional tools present (`c2patool`, `exiftool`) and versions if relevant:
 
 ## Input type

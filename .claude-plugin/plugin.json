@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "watermarks-remover",
+  "displayName": "Watermarks Remover",
+  "version": "0.4.0",
+  "description": "Strip multi-vendor AI provenance marks from text and files: invisible Unicode, statistical text watermarks (rewrite), and C2PA/EXIF/XMP/container metadata.",
+  "author": {
+    "name": "watermarks-remover contributors",
+    "url": "https://github.com/guillaumemeyer/watermarks-remover"
+  },
+  "homepage": "https://github.com/guillaumemeyer/watermarks-remover#readme",
+  "repository": "https://github.com/guillaumemeyer/watermarks-remover",
+  "license": "MIT",
+  "keywords": [
+    "watermark",
+    "c2pa",
+    "content-credentials",
+    "metadata",
+    "unicode",
+    "synthid",
+    "provenance",
+    "privacy"
+  ]
+}

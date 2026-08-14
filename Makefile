@@ -1,6 +1,11 @@
 .PHONY: test smoke smoke-synthid bootstrap-synthid docker-synthid-build docker-synthid-help \
-	smoke-ctrlregen bootstrap-ctrlregen docker-ctrlregen-build docker-ctrlregen-help install-skill clean
+	smoke-ctrlregen bootstrap-ctrlregen docker-ctrlregen-build docker-ctrlregen-help \
+	install-skill install-skill-project install-skill-grok uninstall-skill \
+	validate-skill bundle-skill clean
 
+SKILL_NAME := remove-ai-marks
+SKILL_SRC := $(CURDIR)/skills/$(SKILL_NAME)
+PROJECT ?= $(CURDIR)
 SCRIPTS := skills/remove-ai-marks/scripts
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
@@ -49,11 +54,35 @@ docker-ctrlregen-build:
 docker-ctrlregen-help:
 	docker run --rm watermarks-remover-ctrlregen --help
 
+# Claude Code, personal (all your projects): ~/.claude/skills
 install-skill:
+	mkdir -p $(HOME)/.claude/skills
+	ln -sfn $(SKILL_SRC) $(HOME)/.claude/skills/$(SKILL_NAME)
+	@echo "linked -> $(HOME)/.claude/skills/$(SKILL_NAME)  (invoke with /$(SKILL_NAME))"
+
+# Claude Code, project-local: PROJECT=/path/to/repo make install-skill-project
+install-skill-project:
+	mkdir -p $(PROJECT)/.claude/skills
+	ln -sfn $(SKILL_SRC) $(PROJECT)/.claude/skills/$(SKILL_NAME)
+	@echo "linked -> $(PROJECT)/.claude/skills/$(SKILL_NAME)"
+
+install-skill-grok:
 	mkdir -p $(HOME)/.grok/skills
-	ln -sfn $(CURDIR)/skills/remove-ai-marks $(HOME)/.grok/skills/remove-ai-marks
-	@echo "linked -> $(HOME)/.grok/skills/remove-ai-marks"
+	ln -sfn $(SKILL_SRC) $(HOME)/.grok/skills/$(SKILL_NAME)
+	@echo "linked -> $(HOME)/.grok/skills/$(SKILL_NAME)"
+
+uninstall-skill:
+	rm -f $(HOME)/.claude/skills/$(SKILL_NAME) $(PROJECT)/.claude/skills/$(SKILL_NAME) \
+		$(HOME)/.grok/skills/$(SKILL_NAME)
+	@echo "unlinked $(SKILL_NAME)"
+
+validate-skill:
+	$(PYTHON) tools/bundle_skill.py --check
+
+# Zip for claude.ai / Cowork upload (single top-level dir, spec frontmatter).
+bundle-skill:
+	$(PYTHON) tools/bundle_skill.py -o dist/$(SKILL_NAME).zip
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	rm -rf .pytest_cache .venv
+	rm -rf .pytest_cache .venv dist

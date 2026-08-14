@@ -30,17 +30,64 @@ Skill path: [`skills/remove-ai-marks/`](skills/remove-ai-marks/)
 
 ## Install (agent skill)
 
-```bash
-# Grok Build / project-local
-mkdir -p .grok/skills
-ln -sfn "$(pwd)/skills/remove-ai-marks" .grok/skills/remove-ai-marks
+The skill follows the [Agent Skills](https://agentskills.io) spec (`name`, `description`,
+`license`, `compatibility`, `metadata` frontmatter only), so it loads unchanged in
+Claude Code, Claude Cowork, claude.ai and any other Agent Skills runtime.
 
-# User-global Grok
-mkdir -p ~/.grok/skills
-ln -sfn "$(pwd)/skills/remove-ai-marks" ~/.grok/skills/remove-ai-marks
+### Claude Code
+
+```bash
+# Project-local (.claude/skills — commit it to share with the repo, and cloud sessions pick it up)
+make install-skill-project              # or: PROJECT=/path/to/repo make install-skill-project
+
+# Personal, all projects (~/.claude/skills)
+make install-skill
 ```
 
-Invoke with `/remove-ai-marks` or ask to “strip AI watermarks / C2PA / Claude marks / SynthID-class text.”
+Or install the whole repository as a plugin, which bundles the skill and updates with
+`/plugin marketplace update`:
+
+```
+/plugin marketplace add guillaumemeyer/watermarks-remover
+/plugin install watermarks-remover@watermarks-remover
+```
+
+### Claude Cowork, cloud sessions and claude.ai
+
+Cowork and cloud sessions load the skills enabled on your claude.ai account — they do
+**not** read `~/.claude/skills` from your machine. Build the upload bundle and add it from
+**Customize → Skills** in the Cowork desktop app, or from the skills settings on claude.ai:
+
+```bash
+make bundle-skill      # writes dist/remove-ai-marks.zip (validated, single top-level dir)
+```
+
+Cloud sessions can instead use the project install above, since they clone the repository
+and read its `.claude/skills/`.
+
+### Grok Build
+
+```bash
+make install-skill-grok                 # ~/.grok/skills/remove-ai-marks
+```
+
+Invoke with `/remove-ai-marks` (`/watermarks-remover:remove-ai-marks` when installed as a
+plugin), or ask to “strip AI watermarks / C2PA / Claude marks / SynthID-class text.”
+
+`make validate-skill` checks the frontmatter against the upload rules (spec fields only,
+name matches the directory, description under 1024 characters, bundle under 30 MB); the
+same checks run in CI.
+
+### What each host can do
+
+| Host | Layer A + file cleaners | Website audit | Optional pixel backends |
+| --- | --- | --- | --- |
+| Claude Code (local) | Yes | Yes | Yes, after bootstrap |
+| Cowork / cloud session | Yes, on workspace files | Needs outbound HTTPS | No (~10 GB models, GPU) |
+| claude.ai | Yes, on uploaded files | Needs outbound HTTPS | No |
+
+`c2patool` and `exiftool` are usually absent in managed sandboxes, so the PDF strip is
+degraded there — the skill reports that instead of implying a full clean.
 
 Optional system tools (auto-used when present):
 

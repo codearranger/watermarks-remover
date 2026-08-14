@@ -1,20 +1,18 @@
 ---
 name: remove-ai-marks
-description: >
-  Remove multi-vendor AI provenance marks: invisible Unicode (Layer A), statistical
-  text watermarks via rewrite (Layer B, always offer), and C2PA/EXIF/XMP/container
-  metadata on PNG/JPEG/SVG/PDF/DOCX/ODT/HTML/MD. Covers Claude, Gemini/SynthID-class,
-  OpenAI provenance, and open-LLM sampling marks. Use when the user asks to strip
-  watermarks, remove C2PA/Content Credentials, clean AI metadata, remove invisible
-  Unicode, anti-detect clean AI output, or runs /remove-ai-marks (aliases:
-  /remove-claude-marks).
+description: "Remove multi-vendor AI provenance marks: invisible Unicode (Layer A), statistical text watermarks via rewrite (Layer B, always offer), and C2PA/EXIF/XMP/container metadata on PNG/JPEG/SVG/PDF/DOCX/ODT/HTML/MD. Covers Claude, Gemini/SynthID-class, OpenAI provenance, and open-LLM sampling marks. Use when the user asks to strip watermarks, remove C2PA/Content Credentials, clean AI metadata, remove invisible Unicode, audit a directory or site for AI provenance, anti-detect clean AI output, or runs /remove-ai-marks (alias: /remove-claude-marks)."
+license: MIT
+compatibility: "Claude Code (project, personal, or plugin install), Claude Cowork and cloud sessions, claude.ai skill uploads, and any Agent Skills runtime. Needs python3 3.10+ (stdlib only). Optional: c2patool, exiftool. Outbound HTTPS only for audit_website.py; pixel-domain backends need an external checkout and a GPU."
+metadata:
+  version: "0.4.0"
+  homepage: "https://github.com/guillaumemeyer/watermarks-remover"
 ---
 
 # Remove AI marks
 
 Multi-vendor anti-detection hygiene for **text** (Unicode + statistical rewrite) and **files** (C2PA / AI metadata across common containers).
 
-Read if needed:
+Read if needed (paths are relative to this skill's directory):
 
 - `references/mark-classes.md` — Unicode / sampling / C2PA / containers
 - `references/vendor-notes.md` — Claude, Gemini/SynthID, OpenAI, open-LLM
@@ -22,10 +20,22 @@ Read if needed:
 - `references/ethics.md` — intended use
 - `references/how-claude-marks.md` — Anthropic-specific detail
 
-Scripts live in this skill’s `scripts/` directory. Resolve `SCRIPTS` to that folder (absolute path of this skill + `/scripts`).
+## Resolve the scripts directory first
+
+Scripts live in this skill's `scripts/` directory. Set `SCRIPTS` once, then reuse it. Claude Code substitutes `${CLAUDE_SKILL_DIR}`; other runtimes (Cowork, claude.ai, generic Agent Skills hosts) leave it empty, so the fallback finds the skill on disk.
 
 ```bash
-SCRIPTS="<skill_dir>/scripts"
+SCRIPTS="${CLAUDE_SKILL_DIR:-}/scripts"
+[ -f "$SCRIPTS/clean_file.py" ] || SCRIPTS="$(dirname "$(find -L \
+  "$HOME/.claude/skills" "$HOME/.claude/plugins" ./.claude/skills ./skills \
+  /mnt/skills /mnt/user-data "$PWD" \
+  -maxdepth 6 -name SKILL.md -path '*remove-ai-marks*' -print -quit 2>/dev/null)")/scripts"
+python3 "$SCRIPTS/inspect_file.py" --help >/dev/null && echo "SCRIPTS=$SCRIPTS"
+```
+
+If that check fails, ask the user for the install path, or run from a checkout of the repository (`skills/remove-ai-marks/scripts`). On Windows PowerShell use `$env:CLAUDE_SKILL_DIR` and `python` instead of `python3`.
+
+```bash
 python3 "$SCRIPTS/inspect_file.py" ...
 python3 "$SCRIPTS/clean_file.py" ...
 python3 "$SCRIPTS/inspect_text.py" ...
@@ -38,6 +48,19 @@ python3 "$SCRIPTS/rewrite_text.py" ...
 python3 "$SCRIPTS/audit_dir.py" ...
 python3 "$SCRIPTS/audit_website.py" ...
 ```
+
+## Runtime notes
+
+Everything below works with `python3` and the standard library. Adapt when the host restricts more:
+
+| Host | What changes |
+| --- | --- |
+| Claude Code (local) | Full behaviour. `c2patool` / `exiftool` used when installed. |
+| Cowork, cloud sessions, claude.ai | Work on files in the session workspace and hand results back there. `c2patool` / `exiftool` are usually absent — say so in the report and expect a degraded PDF strip. |
+| Sandbox without egress | `audit_website.py` needs outbound HTTPS. If it is blocked, download the assets and run `audit_dir.py` locally instead. |
+| Any host without a GPU / external checkout | The optional CtrlRegen pixel removal and reverse-SynthID scoring are unavailable (~10 GB of models). Skip them and state that pixel-domain marks were not touched. |
+
+Write outputs next to the input as `*.cleaned.*` unless the user asked for in-place edits.
 
 ## Ethics
 
@@ -247,27 +270,27 @@ Always state:
 
 ```bash
 # Unified
-python3 scripts/inspect_file.py notes.md
-python3 scripts/clean_file.py notes.md -o notes.cleaned.md
-python3 scripts/clean_file.py shot.png -o shot.cleaned.png
-python3 scripts/clean_file.py deck.docx -o deck.cleaned.docx
+python3 "$SCRIPTS/inspect_file.py" notes.md
+python3 "$SCRIPTS/clean_file.py" notes.md -o notes.cleaned.md
+python3 "$SCRIPTS/clean_file.py" shot.png -o shot.cleaned.png
+python3 "$SCRIPTS/clean_file.py" deck.docx -o deck.cleaned.docx
 
 # Text Layer A / B
-python3 scripts/inspect_text.py notes.md
-python3 scripts/clean_text.py notes.md -o notes.cleaned.md --stats
-python3 scripts/rewrite_text.py notes.md --backend print-prompt --strength paraphrase
+python3 "$SCRIPTS/inspect_text.py" notes.md
+python3 "$SCRIPTS/clean_text.py" notes.md -o notes.cleaned.md --stats
+python3 "$SCRIPTS/rewrite_text.py" notes.md --backend print-prompt --strength paraphrase
 
 # Images only
-python3 scripts/inspect_image.py shot.png
-python3 scripts/clean_image.py shot.png -o shot.cleaned.png
+python3 "$SCRIPTS/inspect_image.py" shot.png
+python3 "$SCRIPTS/clean_image.py" shot.png -o shot.cleaned.png
 
 # Optional pixel removal (external backend; bootstrap first)
-scripts/setup_ctrlregen.sh
+"$SCRIPTS/setup_ctrlregen.sh"
 NOAI_WATERMARK_DIR=~/noai-watermark \
-  ~/noai-watermark/.venv/bin/python scripts/clean_image.py shot.png \
+  ~/noai-watermark/.venv/bin/python "$SCRIPTS/clean_image.py" shot.png \
   -o shot.cleaned.png --remove-pixel ctrlregen
 
 # Aggregate audits
-python3 scripts/audit_dir.py ./src --json
-python3 scripts/audit_website.py --sitemap https://example.com/sitemap.xml --json
+python3 "$SCRIPTS/audit_dir.py" ./src --json
+python3 "$SCRIPTS/audit_website.py" --sitemap https://example.com/sitemap.xml --json
 ```

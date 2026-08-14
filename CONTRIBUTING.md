@@ -35,8 +35,15 @@ issue.
 | `skills/remove-ai-marks/SKILL.md` | Agent skill entry (workflow, ethics) |
 | `skills/remove-ai-marks/scripts/` | Layer A/B hooks + image/container cleaners |
 | `skills/remove-ai-marks/references/` | Vendors, mark classes, matrix, ethics |
+| `.claude-plugin/` | Claude Code plugin + marketplace manifests |
+| `tools/bundle_skill.py` | Frontmatter validation and the claude.ai / Cowork upload bundle |
 | `tests/` | Pytest suite and fixtures |
 | `.github/workflows/ci.yml` | CI job `test` |
+
+`SKILL.md` frontmatter must stay within the Agent Skills spec fields (`name`,
+`description`, `license`, `compatibility`, `metadata`, `allowed-tools`) — Claude Code
+accepts more, but anything else is a hard error when the skill is uploaded for Cowork
+or claude.ai. Run `make validate-skill` after editing it.
 
 ## Layers (what to change where)
 
