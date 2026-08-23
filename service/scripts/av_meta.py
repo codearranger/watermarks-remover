@@ -32,7 +32,9 @@ from common import classify_finding_confidence, safe_write_bytes
 from image_meta import (
     AI_META_HINTS,
     XMP_UUID,  # noqa: F401 -- re-exported for callers that want the raw constant
+    _build_isobmff_box,
     _contains_any,
+    _isobmff_free_box,
     _parse_isobmff_boxes,
     inspect_isobmff,
     strip_isobmff,
@@ -94,10 +96,10 @@ def _inspect_moov_udta(data: bytes) -> tuple[bool, bool, list[str]]:
     has_c2pa = False
     has_ai = False
     findings: list[str] = []
-    for fourcc, payload, _size, _hdr in _parse_isobmff_boxes(data):
+    for fourcc, payload, _size, _hdr in _parse_isobmff_boxes(data)[0]:
         if fourcc != b"moov":
             continue
-        for s_fourcc, s_payload, _s_size, _s_hdr in _parse_isobmff_boxes(payload):
+        for s_fourcc, s_payload, _s_size, _s_hdr in _parse_isobmff_boxes(payload)[0]:
             if s_fourcc != b"udta":
                 continue
             hits = _contains_any(s_payload, AI_META_HINTS)
@@ -112,19 +114,20 @@ def _inspect_moov_udta(data: bytes) -> tuple[bool, bool, list[str]]:
 def _strip_moov_udta(data: bytes, *, strip_all_metadata: bool) -> tuple[bytes, list[str]]:
     actions: list[str] = []
     out = bytearray()
-    for fourcc, payload, _size, _hdr in _parse_isobmff_boxes(data):
+    for fourcc, payload, _size, hdr in _parse_isobmff_boxes(data)[0]:
         if fourcc != b"moov":
-            out.extend(struct.pack(">I", len(payload) + 8) + fourcc + payload)
+            out.extend(_build_isobmff_box(fourcc, payload, hdr))
             continue
         new_moov = bytearray()
-        for s_fourcc, s_payload, _s_size, _s_hdr in _parse_isobmff_boxes(payload):
+        for s_fourcc, s_payload, s_size, s_hdr in _parse_isobmff_boxes(payload)[0]:
             if s_fourcc == b"udta" and (
                 strip_all_metadata or _contains_any(s_payload, AI_META_HINTS)
             ):
                 actions.append("drop moov/udta box (generator/user-data tags)")
+                new_moov.extend(_isobmff_free_box(s_size, s_hdr))
                 continue
-            new_moov.extend(struct.pack(">I", len(s_payload) + 8) + s_fourcc + s_payload)
-        out.extend(struct.pack(">I", len(new_moov) + 8) + b"moov" + bytes(new_moov))
+            new_moov.extend(_build_isobmff_box(s_fourcc, s_payload, s_hdr))
+        out.extend(_build_isobmff_box(b"moov", bytes(new_moov), hdr))
     return bytes(out), actions
 
 

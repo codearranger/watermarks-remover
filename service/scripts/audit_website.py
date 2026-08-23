@@ -39,6 +39,18 @@ MAX_REDIRECTS = 5
 USER_AGENT = "remove-ai-marks-audit/1.0"
 
 _EXT_FOR_KIND = {
+    "webp": ".webp",
+    "avif": ".avif",
+    "heic": ".heic",
+    "gif": ".gif",
+    "bmp": ".bmp",
+    "tiff": ".tiff",
+    "xlsx": ".xlsx",
+    "pptx": ".pptx",
+    "epub": ".epub",
+    "mp4": ".mp4",
+    "wav": ".wav",
+    "mp3": ".mp3",
     "png": ".png",
     "jpeg": ".jpg",
     "svg": ".svg",
@@ -105,16 +117,65 @@ def guess_kind(url: str, data: bytes, content_type: str | None = None) -> str:
         return "markdown"
     if ct == "text/plain":
         return "text"
+    # The formats the local audit (format_dispatch) handles arrived over HTTP
+    # as "text" before this table knew them: the bytes fell to the Unicode
+    # scanner and binary assets reported clean (#166).
+    if ct in (
+        "image/webp",
+        "image/avif",
+        "image/heic",
+        "image/heif",
+        "image/gif",
+        "image/bmp",
+        "image/tiff",
+    ):
+        return {
+            "image/webp": "webp",
+            "image/avif": "avif",
+            "image/heic": "heic",
+            "image/heif": "heic",
+            "image/gif": "gif",
+            "image/bmp": "bmp",
+            "image/tiff": "tiff",
+        }[ct]
+    if ct == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        return "xlsx"
+    if ct == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        return "pptx"
+    if ct == "application/epub+zip":
+        return "epub"
+    if ct in ("video/mp4", "video/quicktime", "audio/x-m4a", "audio/mp4"):
+        return "mp4"
+    if ct in ("audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"):
+        return {"audio/wav": "wav", "audio/x-wav": "wav", "audio/mpeg": "mp3", "audio/mp3": "mp3"}[
+            ct
+        ]
 
     path = urllib.parse.urlparse(url).path.lower()
     for ext, kind in (
         (".png", "png"),
         (".jpg", "jpeg"),
         (".jpeg", "jpeg"),
+        (".webp", "webp"),
+        (".avif", "avif"),
+        (".heic", "heic"),
+        (".heif", "heic"),
+        (".gif", "gif"),
+        (".bmp", "bmp"),
+        (".tiff", "tiff"),
+        (".tif", "tiff"),
         (".svg", "svg"),
         (".pdf", "pdf"),
         (".docx", "docx"),
+        (".xlsx", "xlsx"),
+        (".pptx", "pptx"),
         (".odt", "odt"),
+        (".epub", "epub"),
+        (".mp4", "mp4"),
+        (".mov", "mp4"),
+        (".m4a", "mp4"),
+        (".wav", "wav"),
+        (".mp3", "mp3"),
         (".html", "html"),
         (".htm", "html"),
         (".md", "markdown"),
@@ -130,6 +191,21 @@ def guess_kind(url: str, data: bytes, content_type: str | None = None) -> str:
         return "jpeg"
     if data.startswith(b"%PDF"):
         return "pdf"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    if data.startswith(b"GIF8"):
+        return "gif"
+    if data.startswith(b"BM"):
+        return "bmp"
+    if data.startswith(b"II*\x00") or data.startswith(b"MM\x00*"):
+        return "tiff"
+    if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"avif", b"avis"):
+            return "avif"
+        if brand in (b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"):
+            return "heic"
+        return "mp4"
     if data[:100].lstrip().startswith(b"<") and b"svg" in data[:500].lower():
         return "svg"
     if b"<html" in data[:2000].lower() or data[:100].lstrip().lower().startswith(b"<"):

@@ -19,12 +19,13 @@ Rewriting is iterative and evaluation-driven: each loop generates
 --candidates (default 1) variants, evaluates each, and stops as soon as an
 attempt passes watermark detection; --max-loops (default 1) caps how many
 evaluation rounds run before the best-effort variant is returned
-(WATERMARKS_REWRITE_LOOPS). The evaluator is chosen by priority: MarkLLM
-same-config detection (when --markllm-scheme is passed) or, when no detector
-is configured, bigram-Jaccard lexical divergence (no pass/fail verdict — all
+(WATERMARKS_REWRITE_LOOPS). The evaluator is chosen by priority: keyed-Gumbel
+same-key replay (when --gumbel-key / WATERMARKS_GUMBEL_KEY is set), else
+MarkLLM same-config detection (--markllm-scheme), else, when no detector is
+configured, bigram-Jaccard lexical divergence (no pass/fail verdict — all
 attempts are generated and the most diverged one is selected). A vendor-detector
-seam (Google's retired SynthID-text detector) is reserved ahead of MarkLLM
-should a vendor endpoint return.
+seam (Google's retired SynthID-text detector) is reserved ahead of the
+same-config detectors should a vendor endpoint return.
 
 Security notes:
   - Only http(s) endpoints are accepted; redirects are refused outright so an
@@ -49,7 +50,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import cleaned_path, eprint, read_text_input, write_text_output
-from text_detectors import MarkLLMTextDetector
+from text_detectors import GumbelTextDetector, MarkLLMTextDetector
 from text_unicode import clean_text
 
 DEFAULT_MARKLLM_MODEL = "facebook/opt-1.3b"
@@ -205,16 +206,20 @@ def _safe_detect(detector: object, text: str) -> dict:
 
 def _pick_evaluator(
     markllm_detector: MarkLLMTextDetector | None,
+    gumbel_detector: GumbelTextDetector | None,
 ) -> tuple[str, object | None]:
     """Pick the evaluator that drives the iterative rewrite loop.
 
-    Priority: MarkLLM same-config detection (when the caller passed
-    --markllm-scheme) > bigram-Jaccard lexical divergence (fallback with no
-    pass/fail verdict). A vendor-detector seam (Google's SynthID-text detector,
-    retired Aug 2026) is reserved ahead of MarkLLM should a vendor endpoint
-    return; it only needs available()/detect()/name per the TextDetector
-    protocol in text_detectors.py.
+    Priority: keyed-Gumbel same-key replay (when the caller passed
+    --gumbel-key) > MarkLLM same-config detection (--markllm-scheme) >
+    bigram-Jaccard lexical divergence (fallback with no pass/fail verdict).
+    A vendor-detector seam (Google's SynthID-text detector, retired Aug 2026)
+    is reserved ahead of both should a vendor endpoint return; it only needs
+    available()/detect()/name per the TextDetector protocol in
+    text_detectors.py.
     """
+    if gumbel_detector is not None:
+        return "gumbel", gumbel_detector
     if markllm_detector is not None:
         return "markllm", markllm_detector
     return "lexical-divergence", None
@@ -356,6 +361,7 @@ def rewrite(
     markllm_dir: str | None = None,
     markllm_model: str | None = None,
     markllm_timeout: float = 180.0,
+    gumbel_key: str | None = None,
 ) -> tuple[str, dict]:
     prompt = build_prompt(strength, text, lang=lang, original_lang=original_lang)
     info: dict = {
@@ -387,6 +393,15 @@ def rewrite(
             eprint(f"markllm verification unavailable: {markllm['before']['error']}")
         info["markllm"] = markllm
 
+    gumbel: dict | None = None
+    gumbel_detector: GumbelTextDetector | None = None
+    if gumbel_key:
+        gumbel_detector = GumbelTextDetector(key=gumbel_key)
+        gumbel = {"before": _safe_detect(gumbel_detector, text)}
+        if not gumbel["before"]["available"]:
+            eprint(f"gumbel verification unavailable: {gumbel['before']['error']}")
+        info["gumbel"] = gumbel
+
     if backend == "print-prompt":
         info["mode"] = "print-prompt"
         if candidates > 1:
@@ -404,7 +419,7 @@ def rewrite(
     n_loops = max(1, max_loops)
     info["candidates"] = n_cands
     info["max_loops"] = n_loops
-    evaluator_name, evaluator = _pick_evaluator(markllm_detector)
+    evaluator_name, evaluator = _pick_evaluator(markllm_detector, gumbel_detector)
     info["evaluator"] = evaluator_name
 
     # Iterative rewrite: each loop generates --candidates variants and
@@ -522,6 +537,28 @@ def rewrite(
             "keys used at generation; it does not certify a vendor detector."
         )
 
+    if gumbel:
+        assert gumbel_detector is not None  # set together with gumbel above
+        if evaluator_name == "gumbel":
+            # The loop already scored the selected attempt; reuse the verdict
+            # instead of paying another replay.
+            after = rec["evaluation"]
+        else:
+            after = _safe_detect(gumbel_detector, out)
+        gumbel["after"] = after
+        before = gumbel["before"]
+        if before.get("available") and after.get("available"):
+            gumbel["cleared"] = bool(
+                before.get("is_watermarked") and not after.get("is_watermarked")
+            )
+        else:
+            gumbel["cleared"] = None
+        gumbel["note"] = (
+            "Keyed-Gumbel detection is a same-key replay: valid only with the "
+            "same key, tokenizer, and PRF layout used at generation; it does "
+            "not certify a vendor detector."
+        )
+
     eprint(
         f"note: evaluator={evaluator_name} attempts={len(attempts)}/"
         f"{n_cands * n_loops} loops={n_loops} passed={passed}"
@@ -599,12 +636,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json-stats", action="store_true", help="Stats JSON on stderr")
     p.add_argument(
         "--markllm-scheme",
-        choices=("kgw", "synthid", "synthid-text"),
+        # Keep in sync with detect_text_watermark.SCHEMES.
+        choices=("kgw", "synthid", "synthid-text", "exp", "unigram", "sir"),
         default=None,
         help="Run MarkLLM before/after detection around the rewrite AND drive "
         "the iterative rewrite loop with it (the evaluator, when configured; "
         "otherwise lexical divergence selects the best variant). "
-        "Scheme = kgw or synthid.",
+        "Scheme = any key of detect_text_watermark.SCHEMES.",
     )
     p.add_argument(
         "--markllm-dir",
@@ -621,6 +659,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(_env("WATERMARKS_MARKLLM_TIMEOUT", "180.0")),
         help="Timeout per MarkLLM detection call (default: 180.0)",
+    )
+    p.add_argument(
+        "--gumbel-key",
+        default=_env("WATERMARKS_GUMBEL_KEY"),
+        help="Secret key for keyed-Gumbel (Aaronson EXP) same-key replay "
+        "detection; drives the iterative rewrite loop as the evaluator when "
+        "set (default: $WATERMARKS_GUMBEL_KEY). Preferred via env — keys on "
+        "argv are visible in ps/history; never logged.",
     )
     p.add_argument(
         "--force-text",
@@ -660,6 +706,7 @@ def main() -> int:
             markllm_dir=args.markllm_dir,
             markllm_model=args.markllm_model,
             markllm_timeout=args.markllm_timeout,
+            gumbel_key=args.gumbel_key,
         )
     except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
         eprint(f"rewrite failed: {e}")

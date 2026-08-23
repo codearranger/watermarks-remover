@@ -248,8 +248,8 @@ def test_run_all_text_detectors_can_exclude_markllm(monkeypatch):
         lambda: pytest.fail("must not construct MarkLLM when excluded"),
     )
     reports = text_detectors.run_all_text_detectors("hello", include_markllm=False)
-    assert len(reports) == 1  # claude placeholder only
-    assert {r["detector"] for r in reports} == {"claude-text"}
+    assert len(reports) == 2  # gumbel + claude placeholder
+    assert {r["detector"] for r in reports} == {"gumbel", "claude-text"}
 
 
 def test_run_all_text_detectors_injects_markllm_instance(monkeypatch, tmp_path):
@@ -284,12 +284,12 @@ def test_claude_placeholder():
 
 def test_detector_status_keys():
     status = text_detectors.detector_status()
-    assert set(status) == {"markllm", "claude-text"}
+    assert set(status) == {"markllm", "gumbel", "claude-text"}
 
 
 def test_run_all_text_detectors_length():
     reports = text_detectors.run_all_text_detectors("hello")
-    assert len(reports) == 2
+    assert len(reports) == 3  # markllm + gumbel + claude placeholder
     assert all("detector" in r for r in reports)
 
 

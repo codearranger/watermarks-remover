@@ -21,6 +21,7 @@ STRIP_CODEPOINTS: frozenset[int] = frozenset(
         0x180C,
         0x180D,
         0x180E,  # Mongolian vowel separator
+        0x180F,  # Mongolian free variation selector-4 (Unicode 14)
         0x200B,  # zero width space
         0x200C,  # zero width non-joiner
         0x200D,  # zero width joiner
@@ -63,6 +64,8 @@ STRIP_CODEPOINTS: frozenset[int] = frozenset(
         0xFE0D,
         0xFE0E,
         0xFE0F,
+        0x3164,  # Hangul filler (blank compatibility jamo)
+        0xFFA0,  # halfwidth Hangul filler
         0xFFF9,  # interlinear annotation
         0xFFFA,
         0xFFFB,
@@ -167,6 +170,37 @@ LATIN_CONFUSABLES: dict[int, str] = {
 # Variation selectors beyond FE0x (VS17-VS256 in Supplementary Special-purpose)
 _VS_SUPPLEMENT = range(0xE0100, 0xE01F0)
 
+# Unassigned code points with Other_Default_Ignorable_Code_Point=Yes: reserved
+# for future default-ignorable characters, so conformant renderers display them
+# invisibly today and normalisation preserves them. They have no legitimate use
+# in interchange text (conformance clause C7), which makes them ideal covert
+# carriers. Kept as explicit ranges, never a category-Cn rule: unicodedata is
+# pinned per Python build, so a Cn rule would destroy freshly assigned real
+# characters. Re-check these ranges on Unicode version bumps: assignment turns
+# a strip entry into a potential preserve-in-context case, exactly as happened
+# when U+180F became Mongolian FVS4 in Unicode 14.
+_RESERVED_IGNORABLE_CPS: frozenset[int] = frozenset({0x2065, 0xE0000})
+_RESERVED_IGNORABLE_RANGES: tuple[range, ...] = (
+    range(0xFFF0, 0xFFF9),
+    range(0xE0080, 0xE0100),
+    range(0xE01F0, 0xE1000),
+)
+
+
+def _is_reserved_ignorable(cp: int) -> bool:
+    if cp in _RESERVED_IGNORABLE_CPS:
+        return True
+    return any(cp in r for r in _RESERVED_IGNORABLE_RANGES)
+
+
+# The 66 Unicode noncharacters: U+FDD0..U+FDEF plus U+nFFFE/U+nFFFF at the
+# end of every plane. Permanently reserved for internal use and prohibited in
+# interchange text (TUS 23.7), so any occurrence in interchange is contraband.
+# Rendered as nothing or tofu, preserved by normalisation, and permanently
+# unassignable, so stripping them carries no future-Unicode risk.
+def _is_noncharacter(cp: int) -> bool:
+    return 0xFDD0 <= cp <= 0xFDEF or (cp & 0xFFFE) == 0xFFFE
+
 
 # Bidi / directional format controls (subset of strip set, finer inspect labels)
 _BIDI_CPS: frozenset[int] = frozenset(
@@ -203,6 +237,26 @@ _PRESERVABLE_BIDI_CPS: frozenset[int] = frozenset(
     }
 )
 
+# Visible-layout format controls: Egyptian hieroglyph quadrat controls,
+# Duployan shorthand overlap/step controls, and musical beam/tie/slur/phrase
+# controls are Cf but visibly govern how their script renders. Next to their
+# own script they are document body, not carriers; floating between unrelated
+# text they stay strip-class. Context ranges include each script's own block
+# (and the controls themselves) so control sequences survive intact.
+_LAYOUT_CF_CONTROLS: tuple[tuple[range, range], ...] = (
+    (range(0x13430, 0x13440), range(0x13000, 0x14400)),  # Egyptian hieroglyphs
+    (range(0x1BCA0, 0x1BCA4), range(0x1BC00, 0x1BCA4)),  # Duployan shorthand
+    (range(0x1D173, 0x1D17B), range(0x1D100, 0x1D200)),  # musical symbols
+)
+
+
+def _layout_cf_script(cp: int) -> range | None:
+    for controls, script in _LAYOUT_CF_CONTROLS:
+        if cp in controls:
+            return script
+    return None
+
+
 # Zero-width family (common edit-based carriers)
 _ZW_FAMILY: frozenset[int] = frozenset({0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x180E})
 
@@ -220,6 +274,10 @@ def _is_strip_cp(cp: int) -> bool:
     # Tag characters used in some stego schemes (U+E0001-U+E007F)
     if 0xE0001 <= cp <= 0xE007F:
         return True
+    if _is_noncharacter(cp):
+        return True
+    if _is_reserved_ignorable(cp):
+        return True
     return bool(_is_private_use(cp))
 
 
@@ -227,7 +285,11 @@ def _strip_kind(cp: int) -> str:
     """Finer-grained inspect kind for strip-class codepoints."""
     if 0xE0001 <= cp <= 0xE007F:
         return "tag_chars"
-    if cp in _VS_SUPPLEMENT or 0xFE00 <= cp <= 0xFE0F or 0x180B <= cp <= 0x180D:
+    if _is_noncharacter(cp):
+        return "noncharacter"
+    if _is_reserved_ignorable(cp):
+        return "reserved_ignorable"
+    if cp in _VS_SUPPLEMENT or 0xFE00 <= cp <= 0xFE0F or cp in _MONGOLIAN_FVS:
         return "variation_selector"
     if cp in _BIDI_CPS:
         return "bidi"
@@ -277,9 +339,9 @@ _TAG_RANGE = range(0xE0020, 0xE0080)
 _ORTHOGRAPHIC_CF: frozenset[int] = frozenset(
     {0x0600, 0x0601, 0x0602, 0x0603, 0x0604, 0x0605, 0x06DD, 0x070F, 0x08E2, 0x110BD, 0x110CD}
 )
-_MONGOLIAN_FVS: frozenset[int] = frozenset({0x180B, 0x180C, 0x180D})
+_MONGOLIAN_FVS: frozenset[int] = frozenset({0x180B, 0x180C, 0x180D, 0x180F})
 _KHMER_VOWELS: frozenset[int] = frozenset({0x17B4, 0x17B5})
-_HANGUL_FILLERS: frozenset[int] = frozenset({0x115F, 0x1160})
+_HANGUL_FILLERS: frozenset[int] = frozenset({0x115F, 0x1160, 0x3164, 0xFFA0})
 _SCRIPT_GLUE: frozenset[int] = _MONGOLIAN_FVS | _KHMER_VOWELS | _HANGUL_FILLERS
 
 
@@ -311,7 +373,7 @@ def _is_mongolian_base(cp: int) -> bool:
 
 
 def _is_variation_selector(cp: int) -> bool:
-    return cp in _VS_SUPPLEMENT or 0xFE00 <= cp <= 0xFE0F or 0x180B <= cp <= 0x180D
+    return cp in _VS_SUPPLEMENT or 0xFE00 <= cp <= 0xFE0F or cp in _MONGOLIAN_FVS
 
 
 def _valid_flag_tag_indices(text: str) -> set[int]:
@@ -359,10 +421,15 @@ def _is_khmer_letter(cp: int) -> bool:
 
 
 def _is_hangul_jamo(cp: int) -> bool:
+    # Conjoining jamo plus the compatibility and halfwidth presentation forms,
+    # so each filler can follow letters of its own form (U+115F/U+1160 after
+    # conjoining jamo, U+3164 after compatibility jamo, U+FFA0 after halfwidth).
     return (
         0x1100 <= cp <= 0x11FF
         or 0xA960 <= cp <= 0xA97C  # Hangul Jamo Extended-A
         or 0xD7B0 <= cp <= 0xD7C6  # Hangul Jamo Extended-B
+        or 0x3131 <= cp <= 0x318E  # Hangul Compatibility Jamo (incl. U+3164)
+        or 0xFFA1 <= cp <= 0xFFDC  # halfwidth Hangul jamo letters
     )
 
 
@@ -406,7 +473,7 @@ def _decide(
         prev_cp = ord(prev_input)
         if cp in _VS_SUPPLEMENT and _is_cjk_ideograph(prev_cp):
             return ("keep", ch, None)
-        if 0x180B <= cp <= 0x180D and _is_mongolian_base(prev_cp):
+        if cp in _MONGOLIAN_FVS and _is_mongolian_base(prev_cp):
             return ("keep", ch, None)
         if 0xFE00 <= cp <= 0xFE0D and _is_cjk_ideograph(prev_cp):
             return ("keep", ch, None)
@@ -437,6 +504,12 @@ def _decide(
             return ("keep", ch, None)
         if cp in _ORTHOGRAPHIC_CF:
             return ("keep", ch, None)
+        script = _layout_cf_script(cp)
+        if script is not None and (
+            (prev_input is not None and ord(prev_input) in script)
+            or (next_input is not None and ord(next_input) in script)
+        ):
+            return ("keep", ch, None)
     if _is_strip_cp(cp):
         return ("strip", "", _strip_kind(cp))
     if normalize_spaces and cp in SPACE_HOMOGLYPHS:
@@ -466,7 +539,7 @@ class CharHit:
     char: str
     label: str
     count: int
-    kind: str  # strip | bidi | tag_chars | variation_selector | zwj_family | private_use | space | confusable | other_cf
+    kind: str  # strip | bidi | tag_chars | variation_selector | zwj_family | private_use | noncharacter | reserved_ignorable | space | confusable | other_cf
     samples: list[int] = field(default_factory=list)  # character offsets
 
 
@@ -551,7 +624,7 @@ def inspect_text(
         "Layer A only: invisible/format Unicode and space homoglyphs (edit-based carriers).",
         "Statistical (token-sampling) watermarks are not detectable here; use Layer B rewrite.",
         "Inspect kinds: strip, bidi, tag_chars, variation_selector, zwj_family, private_use, space, confusable, other_cf.",
-        "Load-bearing invisibles are preserved by default during cleaning: emoji glue, CJK/Mongolian variation selectors, script joiners, complete flag tag sequences, same-script fillers/selectors (Mongolian FVS, Khmer inherent vowels, Hangul jamo fillers), RTL directional marks/paired embeddings, and orthographic Arabic/Syriac Cf marks. Inspection still reports bidi controls. Use explicit strip flags only after review.",
+        "Load-bearing invisibles are preserved by default during cleaning: emoji glue, CJK/Mongolian variation selectors, script joiners, complete flag tag sequences, same-script fillers/selectors (Mongolian FVS, Khmer inherent vowels, Hangul jamo fillers), RTL directional marks/paired embeddings, orthographic Arabic/Syriac Cf marks, and visible-layout format controls next to their own script (Egyptian hieroglyph quadrat, Duployan shorthand, musical beaming). Inspection still reports bidi controls. Use explicit strip flags only after review.",
     ]
     if not hits:
         notes.append(

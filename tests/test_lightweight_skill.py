@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -24,6 +25,55 @@ def test_lightweight_clean_text_cli():
     assert result.stdout.rstrip("\n") == "Hello world again"
     assert '"removed_count": 1' in result.stderr
     assert '"replaced_count": 1' in result.stderr
+
+
+def _run_vendored_clean_and_inspect(cps):
+    payload = "a" + "".join(map(chr, cps)) + "b"
+
+    cleaned = subprocess.run(
+        [sys.executable, str(SKILL / "scripts" / "clean_text.py"), "-", "--stats"],
+        input=payload,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    )
+    assert cleaned.stdout.rstrip("\n") == "ab"
+    assert f'"removed_count": {len(cps)}' in cleaned.stderr
+
+    inspected = subprocess.run(
+        [sys.executable, str(SKILL / "scripts" / "inspect_text.py"), "-", "--json"],
+        input=payload,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+    )
+    assert inspected.returncode == 1  # suspicious input exits 1 by design
+    report = json.loads(inspected.stdout)
+    return {hit["kind"] for hit in report["hits"]}
+
+
+def test_lightweight_clean_strips_reserved_default_ignorables():
+    # The vendored engine must match the service engine on the unassigned
+    # Default_Ignorable ranges (PropList.txt Other_Default_Ignorable_Code_Point).
+    cps = [
+        0x2065,
+        0xE0000,
+        *range(0xFFF0, 0xFFF9),
+        *range(0xE0080, 0xE0100),
+        *range(0xE01F0, 0xE1000),
+    ]
+    assert _run_vendored_clean_and_inspect(cps) == {"reserved_ignorable"}
+
+
+def test_lightweight_clean_strips_noncharacters():
+    # The vendored engine must match the service engine on the 66 Unicode
+    # noncharacters (U+FDD0..U+FDEF plus U+nFFFE/U+nFFFF in every plane).
+    cps = list(range(0xFDD0, 0xFDF0)) + [
+        plane << 16 | low for plane in range(0x11) for low in (0xFFFE, 0xFFFF)
+    ]
+    assert _run_vendored_clean_and_inspect(cps) == {"noncharacter"}
 
 
 def test_lightweight_skill_has_no_template_placeholders():
@@ -98,3 +148,29 @@ def test_lightweight_preserves_legitimate_bidi_and_emoji_glue():
             check=True,
         )
         assert result.stdout.rstrip("\n") == raw
+
+
+def test_lightweight_preserves_egyptian_format_controls():
+    # The vendored engine must match the service engine on visible-layout
+    # format controls: preserved next to their script, stripped when floating.
+    kept = "\U00013079\U00013430\U000130a7"
+    result = subprocess.run(
+        [sys.executable, str(SKILL / "scripts" / "clean_text.py"), "-"],
+        input=kept,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.rstrip("\n") == kept
+
+    floating = "a\U00013430b"
+    result = subprocess.run(
+        [sys.executable, str(SKILL / "scripts" / "clean_text.py"), "-"],
+        input=floating,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.rstrip("\n") == "ab"

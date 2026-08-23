@@ -252,6 +252,73 @@ def test_clean_preserves_mongolian_fvs():
     assert cleaned == raw
 
 
+def test_clean_preserves_mongolian_fvs4():
+    # FVS4 (U+180F, added in Unicode 14) selects a glyph variant just like
+    # FVS1-3 and must stay bound to its Mongolian base.
+    raw = "ᠠ᠏ᠡ"
+    cleaned, stats = clean_text(raw)
+    assert cleaned == raw
+    assert stats["removed_count"] == 0
+
+
+def test_clean_strips_missed_default_ignorable_carriers():
+    # Mongolian FVS4, Hangul Filler, and Halfwidth Hangul Filler are
+    # blank-rendering Default_Ignorable carriers (Mn/Lo, so the Cf catch-all
+    # never saw them). Between Latin they are contraband and must be stripped.
+    for cp in (0x180F, 0x3164, 0xFFA0):
+        raw = "word" + chr(cp) + "word"
+        cleaned, stats = clean_text(raw)
+        assert cleaned == "wordword"
+        assert stats["removed_count"] == 1
+
+
+def test_inspect_flags_missed_default_ignorable_carriers():
+    for cp in (0x180F, 0x3164, 0xFFA0):
+        report = inspect_text("word" + chr(cp) + "word")
+        assert report.suspicious_total >= 1
+
+
+# Unassigned code points carrying Other_Default_Ignorable_Code_Point=Yes:
+# reserved for future default-ignorables, so conformant renderers display
+# them invisibly, and normalisation preserves them. Perfect covert carriers.
+# Ranges transcribed from Unicode PropList.txt independently of the
+# implementation table, so a typo in either shows up as a mismatch.
+RESERVED_IGNORABLE_CPS = [
+    0x2065,
+    0xE0000,
+    *range(0xFFF0, 0xFFF9),
+    *range(0xE0080, 0xE0100),
+    *range(0xE01F0, 0xE1000),
+]
+
+
+def test_clean_strips_reserved_default_ignorables():
+    for cp in RESERVED_IGNORABLE_CPS:
+        raw = "word" + chr(cp) + "word"
+        cleaned, stats = clean_text(raw)
+        assert cleaned == "wordword", f"U+{cp:04X} not stripped"
+        assert stats["removed_count"] == 1
+
+
+def test_inspect_reports_reserved_ignorable_kind():
+    for cp in RESERVED_IGNORABLE_CPS:
+        report = inspect_text("word" + chr(cp) + "word")
+        assert any(h.kind == "reserved_ignorable" for h in report.hits), (
+            f"U+{cp:04X} not reported as reserved_ignorable"
+        )
+
+
+def test_reserved_ignorable_does_not_claim_assigned_neighbours():
+    # Boundary check: U+2064 (invisible plus, Cf) and U+FFF9 (interlinear
+    # annotation anchor) are assigned and already handled under other kinds;
+    # U+E0001 is a tag character. None of them may report reserved_ignorable.
+    for cp in (0x2064, 0xFFF9, 0xE0001, 0xE0100):
+        report = inspect_text("word" + chr(cp) + "word")
+        assert not any(h.kind == "reserved_ignorable" for h in report.hits), (
+            f"U+{cp:04X} wrongly reported as reserved_ignorable"
+        )
+
+
 def test_clean_preserves_khmer_inherent_vowels():
     # Invisible but phonemic inherent vowels after a Khmer consonant.
     for raw in ("\u1780\u17b4\u1781", "\u1780\u17b5\u1781"):
@@ -265,6 +332,24 @@ def test_clean_preserves_hangul_fillers():
     for raw in ("\u1100\u115f\u1161", "\u1100\u1160\u1161"):
         cleaned, _ = clean_text(raw)
         assert cleaned == raw
+
+
+def test_clean_preserves_compatibility_and_halfwidth_hangul_fillers():
+    # U+3164 after a compatibility jamo and U+FFA0 after a halfwidth jamo are
+    # fillers in their own presentation form, preserved exactly like
+    # U+115F/U+1160 after conjoining jamo.
+    for raw in ("\u3131\u3164\u314f", "\uffa1\uffa0\uffc2"):
+        cleaned, stats = clean_text(raw)
+        assert cleaned == raw
+        assert stats["removed_count"] == 0
+
+
+def test_clean_still_strips_floating_compatibility_and_halfwidth_fillers():
+    # Isolated or between Latin they stay contraband (see also
+    # test_clean_strips_missed_default_ignorable_carriers).
+    for raw in ("a\u3164b", "a\uffa0b", "\u3164", "\uffa0"):
+        cleaned, _ = clean_text(raw)
+        assert "\u3164" not in cleaned and "\uffa0" not in cleaned
 
 
 def test_clean_still_strips_floating_script_glue():
@@ -305,3 +390,101 @@ def test_inspect_floating_script_glue_is_suspicious():
 def test_inspect_private_use():
     report = inspect_text("a\ue000b")
     assert any(h.kind == "private_use" for h in report.hits)
+
+
+# The 66 Unicode noncharacters: U+FDD0..U+FDEF plus U+nFFFE/U+nFFFF at the
+# end of every plane. Permanently reserved for internal use and prohibited in
+# interchange (TUS 23.7), rendered as nothing or tofu, preserved by
+# normalisation: covert carriers with no future-assignment risk at all.
+# Transcribed independently of the implementation table.
+NONCHARACTER_CPS = list(range(0xFDD0, 0xFDF0)) + [
+    plane << 16 | low for plane in range(0x11) for low in (0xFFFE, 0xFFFF)
+]
+
+
+def test_noncharacter_list_is_complete():
+    assert len(NONCHARACTER_CPS) == 66
+
+
+def test_clean_strips_noncharacters():
+    for cp in NONCHARACTER_CPS:
+        raw = "word" + chr(cp) + "word"
+        cleaned, stats = clean_text(raw)
+        assert cleaned == "wordword", f"U+{cp:04X} not stripped"
+        assert stats["removed_count"] == 1
+
+
+def test_inspect_reports_noncharacter_kind():
+    for cp in NONCHARACTER_CPS:
+        report = inspect_text("word" + chr(cp) + "word")
+        assert any(h.kind == "noncharacter" for h in report.hits), (
+            f"U+{cp:04X} not reported as noncharacter"
+        )
+
+
+def test_noncharacter_does_not_claim_assigned_neighbours():
+    # U+FDF0 (Arabic ligature) and U+FFFD (replacement character) sit right
+    # next to noncharacter ranges and must stay untouched and unclaimed.
+    for cp in (0xFDF0, 0xFFFD):
+        raw = "word" + chr(cp) + "word"
+        cleaned, _ = clean_text(raw)
+        assert cleaned == raw, f"U+{cp:04X} wrongly altered"
+        report = inspect_text(raw)
+        assert not any(h.kind == "noncharacter" for h in report.hits), (
+            f"U+{cp:04X} wrongly reported as noncharacter"
+        )
+
+
+def test_clean_preserves_egyptian_format_controls():
+    # Quadrat layout controls (joiners, insert/segment pairs) visibly govern
+    # how hieroglyphic text renders: body, not carriers, next to hieroglyphs.
+    for raw in (
+        "\U00013079\U00013430\U000130a7",  # glyph VERTICAL-JOINER glyph
+        "\U00013437\U00013079\U000130a7\U00013438",  # BEGIN/END SEGMENT pair
+    ):
+        cleaned, stats = clean_text(raw)
+        assert cleaned == raw
+        assert stats["removed_count"] == 0
+
+
+def test_clean_preserves_duployan_shorthand_controls():
+    # LETTER OVERLAP between two Duployan letters, UP STEP after one.
+    for raw in ("\U0001bc02\U0001bca0\U0001bc03", "\U0001bc02\U0001bca3"):
+        cleaned, stats = clean_text(raw)
+        assert cleaned == raw
+        assert stats["removed_count"] == 0
+
+
+def test_clean_preserves_musical_beam_controls():
+    # BEGIN/END BEAM around two stemmed notes.
+    raw = "\U0001d158\U0001d165\U0001d173\U0001d158\U0001d165\U0001d174"
+    cleaned, stats = clean_text(raw)
+    assert cleaned == raw
+    assert stats["removed_count"] == 0
+
+
+def test_clean_strips_floating_layout_format_controls():
+    # Between unrelated text the same controls stay strip-class carriers.
+    for cp in (0x13430, 0x13438, 0x1BCA0, 0x1BCA3, 0x1D173, 0x1D17A):
+        raw = "word" + chr(cp) + "word"
+        cleaned, stats = clean_text(raw)
+        assert cleaned == "wordword", f"U+{cp:04X} not stripped when floating"
+        assert stats["removed_count"] == 1
+
+
+def test_inspect_layout_controls_in_context_not_suspicious():
+    raw = "\U00013079\U00013430\U000130a7\U0001bc02\U0001bca0\U0001bc03"
+    report = inspect_text(raw)
+    assert report.suspicious_total == 0
+
+
+def test_inspect_floating_layout_controls_suspicious():
+    for cp in (0x13430, 0x1BCA0, 0x1D173):
+        report = inspect_text("a" + chr(cp) + "b")
+        assert report.suspicious_total >= 1
+
+
+def test_strip_emoji_glue_flag_strips_layout_controls():
+    # Paranoid mode keeps its blanket-strip semantics.
+    cleaned, _ = clean_text("\U00013079\U00013430\U000130a7", strip_emoji_glue=True)
+    assert "\U00013430" not in cleaned

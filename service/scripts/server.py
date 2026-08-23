@@ -39,8 +39,10 @@ import base64
 import binascii
 import json
 import os
+import subprocess
 import sys
 import tempfile
+from functools import cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -54,6 +56,7 @@ from common import (
     MAX_INPUT_BYTES,
     eprint,
     looks_binary,
+    subprocess_preexec_fn,
     which,
 )
 from container_meta import clean_container, inspect_container
@@ -94,13 +97,47 @@ def _json_ok(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
 
+# Flag that makes each tool print its version and exit 0. They disagree:
+# exiftool treats `--version` as an unknown option and prints usage instead.
+_VERSION_FLAG = {"c2patool": "--version", "exiftool": "-ver", "qpdf": "--version"}
+
+
+@cache
+def _tool_usable(cmd: str) -> bool:
+    """True only when the tool is on PATH *and* can actually execute.
+
+    `which` alone answers the wrong question. A binary built for another
+    architecture sits on PATH and still dies before main() -- the published
+    image pins a multi-arch base digest, so an arm64 host gets an arm64 image
+    carrying the x86_64-only c2patool release. Advertising that as available
+    is what lets a probe which never ran read as a clean verdict downstream.
+
+    Cached: a container's tool set cannot change while the process lives.
+    """
+    path = which(cmd)
+    if not path:
+        return False
+    try:
+        r = subprocess.run(
+            [path, _VERSION_FLAG.get(cmd, "--version")],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            preexec_fn=subprocess_preexec_fn,
+            check=False,
+        )
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
 def capabilities() -> dict[str, Any]:
     return {
         "version": VERSION,
         "tools": {
-            "c2patool": which("c2patool") is not None,
-            "exiftool": which("exiftool") is not None,
-            "qpdf": which("qpdf") is not None,
+            "c2patool": _tool_usable("c2patool"),
+            "exiftool": _tool_usable("exiftool"),
+            "qpdf": _tool_usable("qpdf"),
         },
         "pixel_backends": {
             "ctrlregen": bool(os.environ.get("NOAI_WATERMARK_DIR")),

@@ -47,8 +47,16 @@ def scan_file(
     if kind == "text":
         try:
             text = path.read_text(encoding="utf-8", errors="surrogateescape")
-        except OSError as e:
-            return {"path": name, "kind": "text", "error": str(e)}
+        except OSError:
+            # A file that could not be read is a FAILED SCAN, not a clean one:
+            # the old swallowed-error item carried no confidence key, so
+            # is_actionable answered False and every caller recorded the file
+            # as scanned-and-clean (the pre-commit hook returned 0; audit_dir
+            # never produced the EXIT_PARTIAL signal its wrapper exists for).
+            # Let the OSError propagate: audit_dir's _scan_worker and
+            # audit_website's wrapper already convert a raised exception into
+            # a files_skipped entry with EXIT_PARTIAL (#158).
+            raise
         report = inspect_text(text)
         findings, confidences, suspicious = text_findings(report)
         item: dict[str, Any] = {

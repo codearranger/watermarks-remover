@@ -463,3 +463,37 @@ def test_main_rejects_private_base_cleanly(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "invalid base URL" in err
     assert "non-public address" in err
+
+
+def test_unreadable_text_file_is_a_failed_scan_not_clean(tmp_path, monkeypatch):
+    """A text file the scanner cannot open must surface as skipped/partial,
+    never as scanned-and-clean (#158)."""
+    from pathlib import Path
+
+    import audit_lib
+
+    target = tmp_path / "notes.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    def _deny(self, *args, **kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _deny)
+
+    # scan_file raises instead of returning a confidence-less "clean" item.
+    try:
+        audit_lib.scan_file(target)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("scan_file must propagate the read failure")
+
+    # The old swallowed-error item shape must never count as actionable.
+    assert audit_lib.is_actionable({"path": "x.txt", "kind": "text", "error": "denied"}) is False
+
+    # audit_dir's worker converts the raise into a skipped entry.
+    import audit_dir
+
+    item, skipped = audit_dir._scan_worker(target, False)
+    assert item is None
+    assert skipped is not None and "Permission denied" in skipped.get("reason", "")

@@ -408,6 +408,27 @@ def classify_finding_confidence(finding: str) -> str:
     return "informational"
 
 
+def c2patool_probe_note(tools: dict[str, Any]) -> str | None:
+    """Describe an inconclusive c2patool run, or None when it answered.
+
+    c2patool exits non-zero both for an asset with no manifest and for a
+    binary that failed to run, so a caller that only reads `has_manifest`
+    cannot tell "this asset is clean" from "the probe never ran". Reporting
+    the second as the first is the dangerous direction: `has_c2pa: False`
+    beside a dead probe reads as a clean bill of health on the one check a
+    user would trust.
+
+    The wording deliberately avoids the substring "c2patool reports", which
+    classify_finding_confidence() maps to `confirmed`; "not fully inspected"
+    puts it in the `informational` bucket instead.
+    """
+    ct = tools.get("c2patool") or {}
+    if not ct.get("available") or ct.get("ok", True):
+        return None
+    detail = ct.get("error") or "no usable verdict"
+    return f"c2patool probe inconclusive ({detail}); C2PA not fully inspected by this tool"
+
+
 def cleaned_path(src: Path, suffix: str = ".cleaned") -> Path:
     """path/to/file.ext -> path/to/file.cleaned.ext"""
     return src.with_name(f"{src.stem}{suffix}{src.suffix}")

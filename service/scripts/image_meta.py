@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from common import (
+    c2patool_probe_note,
     classify_finding_confidence,
     safe_arg,
     safe_write_bytes,
@@ -475,10 +476,14 @@ XMP_UUID = b"\xbe\x7a\xcf\xcb\x97\xa9\x42\xe8\x9c\x71\x99\x94\x91\xe3\xaf\xac"
 
 def _parse_isobmff_boxes(
     data: bytes, start: int = 0, end: int | None = None
-) -> list[tuple[bytes, bytes, int, int]]:
+) -> tuple[list[tuple[bytes, bytes, int, int]], int]:
     """Parse top-level or container ISOBMFF boxes.
 
-    Returns list of (fourcc, payload, total_box_size, header_size).
+    Returns (boxes, scanned_end): the list of (fourcc, payload,
+    total_box_size, header_size) tuples and the offset where the walk
+    stopped -- the start of the first box that could not be parsed (an
+    overrunning box, or a run of fewer than 8 trailing bytes), or `end`
+    when the whole buffer parsed.
     """
     if end is None:
         end = len(data)
@@ -501,7 +506,20 @@ def _parse_isobmff_boxes(
         payload = data[pos + header_size : pos + size]
         boxes.append((fourcc, payload, size, header_size))
         pos += size
-    return boxes
+    return boxes, pos
+
+
+def _build_isobmff_box(fourcc: bytes, payload: bytes, header_size: int = 8) -> bytes:
+    """Serialize an ISOBMFF box while preserving its header width."""
+    size = len(payload) + header_size
+    if header_size == 16:
+        return struct.pack(">I4sQ", 1, fourcc, size) + payload
+    return struct.pack(">I4s", size, fourcc) + payload
+
+
+def _isobmff_free_box(size: int, header_size: int = 8) -> bytes:
+    """Return an equal-size free box so later absolute offsets stay valid."""
+    return _build_isobmff_box(b"free", b"\x00" * (size - header_size), header_size)
 
 
 def inspect_isobmff(data: bytes, fmt: str = "avif") -> tuple[bool, bool, list[str]]:
@@ -509,9 +527,19 @@ def inspect_isobmff(data: bytes, fmt: str = "avif") -> tuple[bool, bool, list[st
     has_c2pa = False
     has_ai = False
 
-    boxes = _parse_isobmff_boxes(data)
+    boxes, _ = _parse_isobmff_boxes(data)
     if not boxes:
-        return False, False, [f"not a valid {fmt.upper()} (no ISOBMFF boxes found)"]
+        # Box parsing failed (e.g. the first box's size overruns a truncated
+        # download) — that is exactly when the whole-file byte scan below is
+        # most useful, and every sibling inspector (png/jpeg/gif/tiff) still
+        # runs its equivalent after a truncation. Run the fallback, then
+        # report the parse failure alongside whatever it found (#167).
+        whole = _contains_any(data, C2PA_MARKERS)
+        if whole:
+            findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
+            has_c2pa = True
+        findings.append(f"not a valid {fmt.upper()} (no ISOBMFF boxes found)")
+        return has_c2pa, has_ai or has_c2pa, findings
 
     for fourcc, payload, _, _ in boxes:
         name = fourcc.decode("latin-1", errors="replace")
@@ -539,7 +567,7 @@ def inspect_isobmff(data: bytes, fmt: str = "avif") -> tuple[bool, bool, list[st
                     if any(h.lower() in ("c2pa", "contentcredentials", "jumb") for h in hits):
                         has_c2pa = True
         elif fourcc == b"meta":
-            meta_sub = _parse_isobmff_boxes(payload, start=4)
+            meta_sub, _ = _parse_isobmff_boxes(payload, start=4)
             for s_fourcc, s_payload, _, _ in meta_sub:
                 s_name = s_fourcc.decode("latin-1", errors="replace")
                 if s_fourcc in (b"jumb", b"c2pa") or s_name.lower().startswith("c2"):
@@ -1308,15 +1336,34 @@ def run_optional_tools(path: Path) -> dict[str, Any]:
             # missing manifest as "Error: No claim found", which contains
             # the substring "claim" and would otherwise read as a hit.
             no_manifest = "no claim" in low or "no jumbf" in low
-            tools["c2patool"] = {
+            has_manifest = (
+                "claim" in low or "c2pa" in low or "manifest" in low
+            ) and not no_manifest
+            # c2patool exits non-zero for a missing manifest too, so the exit
+            # code alone cannot separate "asset is clean" from "the probe
+            # never ran". Treat the run as conclusive only when it either
+            # found a manifest or said in so many words that there is none.
+            # Anything else -- a crash before main(), a kill, an unrecognized
+            # error -- leaves the C2PA question unanswered, and callers must
+            # not read that as a negative.
+            conclusive = has_manifest or no_manifest
+            entry: dict[str, Any] = {
                 "available": True,
                 "returncode": r.returncode,
                 "snippet": out[:2000],
-                "has_manifest": ("claim" in low or "c2pa" in low or "manifest" in low)
-                and not no_manifest,
+                "has_manifest": has_manifest,
+                "ok": conclusive,
             }
+            if not conclusive:
+                entry["error"] = f"exit {r.returncode}, unrecognized output"
+            tools["c2patool"] = entry
         except Exception as e:
-            tools["c2patool"] = {"available": True, "error": str(e)}
+            tools["c2patool"] = {
+                "available": True,
+                "ok": False,
+                "has_manifest": False,
+                "error": str(e),
+            }
     else:
         tools["c2patool"] = {"available": False}
 
@@ -1675,6 +1722,9 @@ def inspect_image(
     if ct.get("has_manifest"):
         has_c2pa = True
         findings.append("c2patool reports a C2PA-related manifest")
+    probe_note = c2patool_probe_note(tools)
+    if probe_note:
+        notes.append(probe_note)
 
     return ImageInspectReport(
         path=str(path),
@@ -1706,6 +1756,15 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
         chunk_start = pos + 8
         chunk_end = chunk_start + length
         if chunk_end + 4 > len(data):
+            # A truncated chunk (interrupted download): copy the remainder
+            # verbatim instead of dropping it — dropping turned a recoverable
+            # image into an unopenable husk while reporting "already clean"
+            # (#170). Note it as an action so the run is never mistaken for
+            # an ordinary no-op clean.
+            out.extend(data[pos:])
+            actions.append(
+                f"kept {len(data) - pos} bytes of truncated chunk {ctype.decode('latin-1', errors='replace')} tail (file truncated)"
+            )
             break
         payload = data[chunk_start:chunk_end]
         crc_bytes = data[chunk_end : chunk_end + 4]
@@ -1868,55 +1927,76 @@ def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
 def strip_isobmff(
     data: bytes, fmt: str = "avif", *, strip_all_metadata: bool = True
 ) -> tuple[bytes, list[str]]:
-    boxes = _parse_isobmff_boxes(data)
+    boxes, scanned_end = _parse_isobmff_boxes(data)
     if not boxes:
         raise ValueError(f"not a valid {fmt.upper()} (no ISOBMFF boxes)")
 
+    # scanned_end is where the box walk stopped: the parser halts at the first
+    # box whose declared size overruns the data (a truncated download). The
+    # rebuild below used to emit only the boxes that parsed — dropping a
+    # truncated mdat, the actual coded image, while reporting "already clean"
+    # (#170); the tail is appended verbatim afterwards instead.
     actions: list[str] = []
     out = bytearray()
 
-    for fourcc, payload, _size, _header_size in boxes:
+    for fourcc, payload, size, header_size in boxes:
         name = fourcc.decode("latin-1", errors="replace")
         if fourcc in (b"jumb", b"c2pa") or name.lower().startswith("c2"):
             actions.append(f"drop top-level {name} box (C2PA/JUMBF)")
+            out.extend(_isobmff_free_box(size, header_size))
             continue
 
         if fourcc == b"uuid":
             if payload.startswith(XMP_UUID):
                 actions.append(f"drop top-level {name} box (XMP metadata)")
+                out.extend(_isobmff_free_box(size, header_size))
                 continue
             if strip_all_metadata or _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
                 actions.append(f"drop top-level {name} box (UUID metadata)")
+                out.extend(_isobmff_free_box(size, header_size))
                 continue
 
         if fourcc == b"meta":
             meta_verflags = payload[:4] if len(payload) >= 4 else b"\x00\x00\x00\x00"
-            sub_boxes = _parse_isobmff_boxes(payload, start=4)
+            sub_boxes, _ = _parse_isobmff_boxes(payload, start=4)
             clean_sub = bytearray()
-            for s_fourcc, s_payload, _s_size, _s_hdr in sub_boxes:
+            for s_fourcc, s_payload, s_size, s_hdr in sub_boxes:
                 s_name = s_fourcc.decode("latin-1", errors="replace")
                 if s_fourcc in (b"jumb", b"c2pa") or s_name.lower().startswith("c2"):
                     actions.append(f"drop meta sub-box {s_name} (C2PA/JUMBF)")
+                    clean_sub.extend(_isobmff_free_box(s_size, s_hdr))
                     continue
                 if s_fourcc == b"uuid":
                     if s_payload.startswith(XMP_UUID):
                         actions.append(f"drop meta sub-box {s_name} (XMP metadata)")
+                        clean_sub.extend(_isobmff_free_box(s_size, s_hdr))
                         continue
                     if strip_all_metadata or _contains_any(s_payload, AI_META_HINTS + C2PA_MARKERS):
                         actions.append(f"drop meta sub-box {s_name} (UUID metadata)")
+                        clean_sub.extend(_isobmff_free_box(s_size, s_hdr))
                         continue
                 if s_fourcc in (b"xml ", b"bxml") and (
                     strip_all_metadata or _contains_any(s_payload, AI_META_HINTS + C2PA_MARKERS)
                 ):
                     actions.append(f"drop meta sub-box {s_name} (XML metadata)")
+                    clean_sub.extend(_isobmff_free_box(s_size, s_hdr))
                     continue
-                clean_sub.extend(struct.pack(">I", len(s_payload) + 8) + s_fourcc + s_payload)
+                clean_sub.extend(_build_isobmff_box(s_fourcc, s_payload, s_hdr))
 
             new_meta_payload = meta_verflags + clean_sub
-            out.extend(struct.pack(">I", len(new_meta_payload) + 8) + b"meta" + new_meta_payload)
+            out.extend(_build_isobmff_box(b"meta", new_meta_payload, header_size))
             continue
 
-        out.extend(struct.pack(">I", len(payload) + 8) + fourcc + payload)
+        out.extend(_build_isobmff_box(fourcc, payload, header_size))
+
+    if scanned_end < len(data):
+        tail = data[scanned_end:]
+        out.extend(tail)
+        # An 8-byte header whose box overruns the data is a truncated download
+        # worth reporting; fewer than 8 leftover bytes is merely trailing junk
+        # and is kept verbatim without claiming the file was truncated (#170).
+        if len(tail) >= 8:
+            actions.append(f"kept {len(tail)} bytes of truncated tail (file truncated)")
 
     if not actions:
         actions.append(f"no {fmt.upper()} metadata boxes removed (already clean or none matched)")

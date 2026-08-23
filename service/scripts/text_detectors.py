@@ -17,6 +17,10 @@ Detectors:
 - markllm — research harness (KGW / SynthID schemes) via
   detect_text_watermark.py, activated by MARKLLM_DIR. Same-config-only
   detection; not a vendor oracle.
+- gumbel — model-free same-key replay of the keyed-Gumbel (Aaronson EXP)
+  scheme (detect_gumbel.py), activated by WATERMARKS_GUMBEL_KEY. Stdlib-only;
+  valid only against the same key, tokenizer, and PRF layout used at
+  generation (self-hosted engines such as arbi-serve); not a vendor oracle.
 - claude-text — placeholder for Anthropic's announced text-watermark
   detection API. Reports unavailable until a public endpoint exists; the
   interface it must implement is already defined here.
@@ -39,6 +43,8 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
+
+from detect_gumbel import DEFAULT_THRESHOLD, DEFAULT_WINDOW, detect_text
 
 DEFAULT_MARKLLM_SCHEME = "kgw"
 DEFAULT_MARKLLM_TIMEOUT = 600.0
@@ -252,6 +258,75 @@ class MarkLLMTextDetector:
 
 
 # ---------------------------------------------------------------------------
+# Keyed-Gumbel (Aaronson EXP) — model-free same-key replay
+# ---------------------------------------------------------------------------
+
+
+class GumbelTextDetector:
+    """Same-key replay of the keyed-Gumbel (Aaronson EXP) text watermark.
+
+    Model-free: implements the detection arithmetic of the ARBI keyed-Gumbel
+    technical report (Sections 2-3) — replay u = PRF(Hash(key, window), token)
+    from the text alone and test the Gamma tail — so it needs no GPU, model,
+    or logits. Detection is valid only against the SAME key, tokenizer, and
+    PRF layout used at generation (self-hosted engines such as arbi-serve);
+    it is not a vendor oracle. Key from WATERMARKS_GUMBEL_KEY (env) or the
+    constructor override.
+    """
+
+    name = "gumbel"
+    vendor = "self-hosted"
+
+    def __init__(
+        self,
+        *,
+        key: str | None = None,
+        window: int | None = None,
+        threshold: float | None = None,
+    ) -> None:
+        self._key = key
+        self._window = window
+        self._threshold = threshold
+
+    def _key_env(self) -> str | None:
+        if self._key:
+            return self._key
+        return os.environ.get("WATERMARKS_GUMBEL_KEY", "").strip() or None
+
+    def available(self) -> bool:
+        return self._key_env() is not None
+
+    def detect(self, text: str) -> dict[str, Any]:
+        key = self._key_env()
+        report: dict[str, Any] = {
+            "detector": self.name,
+            "scheme": "exp",
+            "vendor": self.vendor,
+            "available": False,
+        }
+        if key is None:
+            report["error"] = "WATERMARKS_GUMBEL_KEY not set"
+            return report
+        try:
+            payload = detect_text(
+                text,
+                key,
+                window=self._window or DEFAULT_WINDOW,
+                threshold=self._threshold or DEFAULT_THRESHOLD,
+            )
+        except Exception as e:  # fail-soft contract: never raise
+            report["error"] = f"keyed-Gumbel detection failed: {e}"
+            return report
+        payload["detector"] = self.name
+        payload["note"] = (
+            "same-key replay of the keyed-Gumbel (Aaronson EXP) watermark: valid "
+            "only with the same key, tokenizer, and PRF layout used at generation; "
+            "not a vendor detector."
+        )
+        return payload
+
+
+# ---------------------------------------------------------------------------
 # Claude (Anthropic) — announced detector API, not yet public
 # ---------------------------------------------------------------------------
 
@@ -290,11 +365,17 @@ class ClaudeTextDetector:
 
 
 def all_detectors(
-    markllm: MarkLLMTextDetector | None = None, *, include_markllm: bool = True
+    markllm: MarkLLMTextDetector | None = None,
+    *,
+    include_markllm: bool = True,
+    gumbel: GumbelTextDetector | None = None,
+    include_gumbel: bool = True,
 ) -> list[TextDetector]:
     detectors: list[TextDetector] = []
     if include_markllm:
         detectors.append(markllm or MarkLLMTextDetector())
+    if include_gumbel:
+        detectors.append(gumbel or GumbelTextDetector())
     detectors.append(ClaudeTextDetector())
     return detectors
 
@@ -309,14 +390,24 @@ def run_all_text_detectors(
     *,
     markllm: MarkLLMTextDetector | None = None,
     include_markllm: bool = True,
+    gumbel: GumbelTextDetector | None = None,
+    include_gumbel: bool = True,
 ) -> list[dict[str, Any]]:
     """Run every detector (including unavailable ones, with reasons).
 
     markllm injects a caller-parameterized MarkLLM detector (e.g. one
     driven by rewrite_text.py CLI flags); pass include_markllm=False to
-    exclude the MarkLLM harness entirely.
+    exclude the MarkLLM harness entirely. Same for gumbel.
     """
-    return [d.detect(text) for d in all_detectors(markllm, include_markllm=include_markllm)]
+    return [
+        d.detect(text)
+        for d in all_detectors(
+            markllm,
+            include_markllm=include_markllm,
+            gumbel=gumbel,
+            include_gumbel=include_gumbel,
+        )
+    ]
 
 
 def run_text_detectors(
@@ -324,10 +415,17 @@ def run_text_detectors(
     *,
     markllm: MarkLLMTextDetector | None = None,
     include_markllm: bool = True,
+    gumbel: GumbelTextDetector | None = None,
+    include_gumbel: bool = True,
 ) -> list[dict[str, Any]]:
     """Run only the detectors that are configured and usable."""
     return [
         d.detect(text)
-        for d in all_detectors(markllm, include_markllm=include_markllm)
+        for d in all_detectors(
+            markllm,
+            include_markllm=include_markllm,
+            gumbel=gumbel,
+            include_gumbel=include_gumbel,
+        )
         if d.available()
     ]
